@@ -2,11 +2,13 @@
 
 import urllib.request
 import urllib.error
+import urllib.parse
 import json
 import ssl
 from typing import Optional
 
 GITHUB_API = "https://api.github.com"
+GITHUB_UPLOADS = "https://uploads.github.com"
 
 
 class Permission:
@@ -130,6 +132,51 @@ class GitHubClient:
             "base": base,
         })
         return PullRequestResponse(html_url=data["html_url"], number=data["number"])
+
+    def ensure_release(self, owner: str, repo: str, tag: str,
+                       name: Optional[str] = None, prerelease: bool = True) -> dict:
+        """Return the release for `tag`, creating it (prerelease) if missing."""
+        try:
+            return self._get(f"/repos/{owner}/{repo}/releases/tags/{tag}")
+        except urllib.error.HTTPError as e:
+            if e.code != 404:
+                raise
+        return self._post(f"/repos/{owner}/{repo}/releases", body={
+            "tag_name": tag,
+            "name": name or tag,
+            "prerelease": prerelease,
+            "body": "czdev upload buffer. Holds .deb assets referenced by package PRs.",
+        })
+
+    def find_release_asset(self, release: dict, name: str) -> Optional[dict]:
+        for asset in release.get("assets", []):
+            if asset.get("name") == name:
+                return asset
+        return None
+
+    def delete_release_asset(self, owner: str, repo: str, asset_id: int) -> None:
+        self._request("DELETE", f"/repos/{owner}/{repo}/releases/assets/{asset_id}")
+
+    def upload_release_asset(self, owner: str, repo: str, release: dict,
+                             file_path: str, name: str) -> str:
+        """Upload `file_path` as a release asset, replacing any existing one.
+
+        Returns the browser_download_url.
+        """
+        existing = self.find_release_asset(release, name)
+        if existing:
+            self.delete_release_asset(owner, repo, existing["id"])
+        release_id = release["id"]
+        url = f"{GITHUB_UPLOADS}/repos/{owner}/{repo}/releases/{release_id}/assets?name={urllib.parse.quote(name)}"
+        with open(file_path, "rb") as f:
+            data = f.read()
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Authorization", f"Bearer {self.token}")
+        req.add_header("User-Agent", "czdev/0.1")
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("Content-Type", "application/octet-stream")
+        resp = urllib.request.urlopen(req, context=self._ctx)
+        return json.loads(resp.read().decode())["browser_download_url"]
 
     def get_file_content(self, owner: str, repo: str, path: str) -> bytes:
         url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"

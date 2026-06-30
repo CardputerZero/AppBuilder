@@ -18,10 +18,13 @@ from .github_client import GitHubClient, Permission
 
 TARGET_OWNER = "CardputerZero"
 TARGET_REPO = "packages"
+# Buffer release tag on the push target (contributor fork, or the official repo
+# for maintainers) where the .deb is uploaded before review.
+BUFFER_RELEASE_TAG = "czdev-buffer"
 
 
 def run(deb: Optional[str] = None):
-    check_git_lfs_installed()
+    check_git_installed()
 
     deb_path = resolve_deb(deb)
     print(f"Package: {deb_path}")
@@ -68,8 +71,8 @@ def run(deb: Optional[str] = None):
     print(f"  ✓ Version: {meta['version']}, Arch: {meta['architecture']}, Size: {size_mb:.1f} MB")
     print()
 
-    if file_size > 100 * 1024 * 1024:
-        print(f"ERROR: File too large. GitHub blob API limit is 100 MB. ({size_mb:.1f} MB)", file=sys.stderr)
+    if file_size > 2 * 1024 * 1024 * 1024:
+        print(f"ERROR: File too large. GitHub release asset limit is 2 GiB. ({size_mb:.1f} MB)", file=sys.stderr)
         sys.exit(1)
 
     # 5. Check version is newer than existing
@@ -92,39 +95,58 @@ def run(deb: Optional[str] = None):
         branch = branch_name(meta)
         pr_head = f"{user.login}:{branch}"
 
-    # Upload via git init + fetch + lfs push
+    # Integrity + canonical asset name. GitHub sanitizes '~' to '.' in release
+    # asset names, so the on-release/manifest filename may differ from the
+    # Debian version string (which keeps '~').
     file_bytes = Path(deb_path).read_bytes()
     sha256_hash = hashlib.sha256(file_bytes).hexdigest()
-    file_path_in_repo = f"pool/main/{meta['package']}/{meta['package']}_{meta['version']}_{meta['architecture']}.deb"
+    file_size = len(file_bytes)
+    deb_name = f"{meta['package']}_{meta['version']}_{meta['architecture']}.deb"
+    asset_name = deb_name.replace("~", ".")
+    manifest_name = f"{asset_name}.release.json"
+    manifest_path_in_repo = f"pool/main/{meta['package']}/{manifest_name}"
     branch = branch_name(meta)
     remote_url = f"git@github.com:{push_owner}/{push_repo}.git"
 
-    print(f"Uploading to {TARGET_OWNER}/{TARGET_REPO}...")
+    # 1) Upload the .deb to a buffer Release on the push target. For third-party
+    #    contributors this is their own fork — it uses THEIR free Release storage
+    #    and bandwidth, so the upstream project stores nothing until the PR is
+    #    approved and CI promotes the binary into the official apt-pool release.
+    print(f"  → Uploading .deb ({size_mb:.1f} MB) to {push_owner}/{push_repo} release '{BUFFER_RELEASE_TAG}'... ",
+          end="", flush=True)
+    release = gh.ensure_release(push_owner, push_repo, BUFFER_RELEASE_TAG, name="czdev upload buffer")
+    download_url = gh.upload_release_asset(push_owner, push_repo, release, deb_path, asset_name)
+    print("done")
+
+    manifest = {
+        "filename": asset_name,
+        "url": download_url,
+        "sha256": sha256_hash,
+        "size": file_size,
+        "package": meta["package"],
+        "version": meta["version"],
+        "architecture": meta["architecture"],
+    }
+
+    # 2) Commit only metadata (meta.json, screenshots, icon, manifest) to a PR
+    #    branch — no .deb, no LFS.
+    print(f"Uploading metadata to {TARGET_OWNER}/{TARGET_REPO}...")
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="czdev-publish-"))
     try:
-        # Init bare-minimum repo with LFS
         run_cmd_in(tmp_dir, ["git", "init"])
         run_cmd_in(tmp_dir, ["git", "remote", "add", "origin", remote_url])
-        run_cmd_in(tmp_dir, ["git", "lfs", "install", "--local"])
-        run_cmd_in(tmp_dir, ["git", "config",
-                             "lfs.https://github.com/CardputerZero/packages.git/info/lfs.locksverify", "false"])
 
-        # Fetch only the tip of main
         print("  → git fetch (minimal)... ", end="", flush=True)
         run_cmd_in(tmp_dir, ["git", "fetch", "--depth=1", "--filter=blob:none", "origin", "main"])
         print("done")
 
-        # Create branch from fetched main
         print(f"  → Creating branch {branch}... ", end="", flush=True)
         run_cmd_in(tmp_dir, ["git", "checkout", "-b", branch, "origin/main"])
         print("done")
 
-        # Copy deb into place
         dest_dir = tmp_dir / "pool" / "main" / meta["package"]
         dest_dir.mkdir(parents=True, exist_ok=True)
-        deb_dest_name = f"{meta['package']}_{meta['version']}_{meta['architecture']}.deb"
-        shutil.copy2(deb_path, dest_dir / deb_dest_name)
 
         # Copy screenshots
         if store_meta.get("screenshots"):
@@ -143,19 +165,17 @@ def run(deb: Optional[str] = None):
             if icon_src.exists():
                 shutil.copy2(icon_src, dest_dir / icon_src.name)
 
-        # Generate meta.json
-        meta_json = json.dumps(store_meta, indent=2, ensure_ascii=False)
-        (dest_dir / "meta.json").write_text(meta_json)
+        # meta.json + release manifest (the binary stays in the buffer release)
+        (dest_dir / "meta.json").write_text(json.dumps(store_meta, indent=2, ensure_ascii=False))
+        (dest_dir / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
 
-        # Add and commit
         print("  → Creating commit... ", end="", flush=True)
         run_cmd_in(tmp_dir, ["git", "add", f"pool/main/{meta['package']}"])
         run_cmd_in(tmp_dir, ["git", "commit", "-m",
                              f"publish: {meta['package']} {meta['version']} ({meta['architecture']})"])
         print("done")
 
-        # Push branch
-        print(f"  → Uploading blob ({size_mb:.1f} MB)... ", end="", flush=True)
+        print("  → Pushing branch... ", end="", flush=True)
         run_cmd_in(tmp_dir, ["git", "push", "origin", branch])
         print("done")
 
@@ -173,8 +193,11 @@ def run(deb: Optional[str] = None):
         f"| Maintainer | {meta['maintainer']} |\n"
         f"| Size | {size_mb:.1f} MB |\n"
         f"| SHA-256 | `{sha256_hash}` |\n"
-        f"| File | `{file_path_in_repo}` |\n\n"
-        f"Submitted via `czdev publish`."
+        f"| Manifest | `{manifest_path_in_repo}` |\n"
+        f"| Binary | [{asset_name}]({download_url}) |\n\n"
+        f"Submitted via `czdev publish`. The `.deb` is hosted on the contributor's "
+        f"buffer release; CI verifies the sha256 and, on merge, promotes it into the "
+        f"official `apt-pool` release."
     )
     print("  → Creating pull request... ", end="", flush=True)
     pr = gh.create_pull_request(
@@ -357,22 +380,11 @@ def compare_versions(a: str, b: str) -> int:
     return 0
 
 
-def check_git_lfs_installed():
+def check_git_installed():
     try:
         subprocess.run(["git", "--version"], capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         print("git is not installed.\n  Install: https://git-scm.com/downloads", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        subprocess.run(["git", "lfs", "version"], capture_output=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print("git-lfs is required for publishing.\n", file=sys.stderr)
-        print("  Install:", file=sys.stderr)
-        print("    macOS:  brew install git-lfs", file=sys.stderr)
-        print("    Linux:  sudo apt install git-lfs", file=sys.stderr)
-        print("    Windows: https://git-lfs.com", file=sys.stderr)
-        print("\n  Then run: git lfs install", file=sys.stderr)
         sys.exit(1)
 
 

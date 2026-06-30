@@ -1,10 +1,12 @@
 """Unpublish (remove) a package from the CardputerZero app store — mirrors the Rust unpublish module."""
 
+import json
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.request
 from pathlib import Path
 
 from . import auth
@@ -24,17 +26,36 @@ def run(package: str, version: str, arch: str = "arm64"):
     if user.email:
         all_emails.append(user.email)
 
-    file_path = f"pool/main/{package}/{package}_{version}_{arch}.deb"
+    # Packages are referenced by a manifest in git; the .deb itself lives in a
+    # Release. GitHub sanitizes '~' to '.' in release asset names.
+    asset_name = f"{package}_{version}_{arch}.deb".replace("~", ".")
+    file_path = f"pool/main/{package}/{asset_name}.release.json"
 
-    # Verify the file exists and belongs to this user
     print(f"Checking ownership of {package} {version}...")
 
-    # Use git sparse checkout + LFS to fetch just this one deb file
+    # Read the manifest from the repo, download the .deb it points at, and
+    # verify the Maintainer matches this user.
     tmp_dir = Path(tempfile.mkdtemp(prefix="czdev-unpublish-"))
     try:
-        deb_local = fetch_deb_via_git(tmp_dir, file_path)
-        if deb_local is None:
-            print("ERROR: package not found in repository", file=sys.stderr)
+        try:
+            manifest_raw = gh.get_file_content(TARGET_OWNER, TARGET_REPO, file_path)
+        except FileNotFoundError:
+            print("ERROR: package manifest not found in repository", file=sys.stderr)
+            sys.exit(1)
+        try:
+            manifest = json.loads(manifest_raw)
+            deb_url = manifest["url"]
+        except (json.JSONDecodeError, KeyError):
+            print("ERROR: invalid manifest (missing url)", file=sys.stderr)
+            sys.exit(1)
+
+        deb_local = tmp_dir / asset_name
+        try:
+            req = urllib.request.Request(deb_url, headers={"User-Agent": "czdev/0.1"})
+            with urllib.request.urlopen(req, timeout=600) as resp, open(deb_local, "wb") as out:
+                shutil.copyfileobj(resp, out)
+        except Exception as exc:
+            print(f"ERROR: could not download package binary: {exc}", file=sys.stderr)
             sys.exit(1)
 
         try:
@@ -92,8 +113,9 @@ def run(package: str, version: str, arch: str = "arm64"):
     pr_body = (
         f"## Remove package: `{package}` v{version}\n\n"
         f"Requested by @{user.login} (maintainer email: {maint_email}).\n\n"
-        f"File: `{file_path}`\n\n"
-        f"Submitted via `czdev unpublish`."
+        f"Manifest: `{file_path}`\n\n"
+        f"Submitted via `czdev unpublish`. Removing the manifest drops the package "
+        f"from the index on the next build; the apt-pool asset can be pruned separately."
     )
     pr = gh.create_pull_request(
         TARGET_OWNER, TARGET_REPO,
@@ -117,49 +139,3 @@ def extract_email(maintainer: str) -> str:
     if start != -1 and end != -1:
         return maintainer[start + 1:end]
     return maintainer
-
-
-def fetch_deb_via_git(tmp_dir: Path, file_path: str):
-    """Sparse-checkout + LFS smudge a single deb file from the packages repo."""
-    remote_url = f"git@github.com:{TARGET_OWNER}/{TARGET_REPO}.git"
-    cmds = [
-        ["git", "init"],
-        ["git", "remote", "add", "origin", remote_url],
-        ["git", "lfs", "install", "--local"],
-        ["git", "config", "core.sparseCheckout", "true"],
-    ]
-    for cmd in cmds:
-        r = subprocess.run(cmd, cwd=str(tmp_dir), capture_output=True)
-        if r.returncode != 0:
-            return None
-
-    # Write sparse-checkout pattern
-    sparse_dir = tmp_dir / ".git" / "info"
-    sparse_dir.mkdir(parents=True, exist_ok=True)
-    (sparse_dir / "sparse-checkout").write_text(file_path + "\n")
-
-    # Fetch main (depth=1) then checkout
-    r = subprocess.run(
-        ["git", "fetch", "--depth=1", "origin", "main"],
-        cwd=str(tmp_dir), capture_output=True,
-    )
-    if r.returncode != 0:
-        return None
-
-    r = subprocess.run(
-        ["git", "checkout", "origin/main"],
-        cwd=str(tmp_dir), capture_output=True,
-    )
-    if r.returncode != 0:
-        return None
-
-    # LFS pull just this file
-    subprocess.run(
-        ["git", "lfs", "pull", "--include", file_path],
-        cwd=str(tmp_dir), capture_output=True,
-    )
-
-    local_path = tmp_dir / file_path
-    if local_path.exists() and local_path.stat().st_size > 200:
-        return local_path
-    return None
