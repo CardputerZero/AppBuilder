@@ -75,8 +75,35 @@ typedef struct {
 } WxState;
 static WxState g;
 
-static double CFG_LAT = 6.9271, CFG_LON = 79.8612;
-static char   CFG_CITY[48] = "Colombo";
+/* Location config, guarded by cfg_lock so the picker (UI thread) and the
+ * fetch thread never see a half-updated lat/lon/city. g_refetch forces the
+ * fetch thread to poll immediately after a location change. */
+static SDL_mutex     *cfg_lock;
+static double         CFG_LAT = 6.9271, CFG_LON = 79.8612;
+static char           CFG_CITY[48] = "Colombo";
+static volatile int   g_refetch = 0;
+
+/* Built-in city presets (name, lat, lon). "Custom (env)" keeps whatever was
+ * set via WEATHER_LAT/LON/CITY or edited in the picker. */
+typedef struct { const char *name; double lat, lon; } city_t;
+static const city_t CITIES[] = {
+    { "Colombo",     6.9271,  79.8612 },
+    { "London",     51.5074,  -0.1278 },
+    { "New York",   40.7128, -74.0060 },
+    { "San Francisco", 37.7749, -122.4194 },
+    { "Tokyo",      35.6762, 139.6503 },
+    { "Singapore",   1.3521, 103.8198 },
+    { "Sydney",    -33.8688, 151.2093 },
+    { "Dubai",      25.2048,  55.2708 },
+    { "Berlin",     52.5200,  13.4050 },
+    { "Mumbai",     19.0760,  72.8777 },
+    { "Bengaluru",  12.9716,  77.5946 },
+    { "Paris",      48.8566,   2.3522 },
+    { "Sao Paulo", -23.5505, -46.6333 },
+    { "Nairobi",    -1.2921,  36.8219 },
+    { "Moscow",     55.7558,  37.6173 },
+};
+#define N_CITIES ((int)(sizeof(CITIES) / sizeof(CITIES[0])))
 
 /* ---- libcurl response buffer ---- */
 typedef struct { char *p; size_t n; } Buf;
@@ -111,11 +138,16 @@ static int json_num(const char *json, const char *key, float *out) {
 }
 
 static void fetch_once(void) {
+    double lat, lon;
+    SDL_LockMutex(cfg_lock);
+    lat = CFG_LAT; lon = CFG_LON;
+    SDL_UnlockMutex(cfg_lock);
+
     char url[256];
     snprintf(url, sizeof(url),
         "https://api.open-meteo.com/v1/forecast?latitude=%.4f&longitude=%.4f"
         "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m",
-        CFG_LAT, CFG_LON);
+        lat, lon);
 
     CURL *c = curl_easy_init();
     if (!c) return;
@@ -158,13 +190,30 @@ static int fetch_thread(void *arg) {
     Uint32 last = 0;
     while (g_running) {
         Uint32 now = SDL_GetTicks();
-        if (last == 0 || now - last >= REFRESH_MS) {
+        if (last == 0 || now - last >= REFRESH_MS || g_refetch) {
+            g_refetch = 0;
+            /* Mark "fetching..." immediately so a location change gives instant
+             * feedback rather than showing the old city's numbers. */
+            SDL_LockMutex(g.lock);
+            g.ok = 0;
+            snprintf(g.err, sizeof(g.err), "fetching...");
+            SDL_UnlockMutex(g.lock);
             fetch_once();
             last = SDL_GetTicks();
         }
-        SDL_Delay(200);
+        SDL_Delay(100);
     }
     return 0;
+}
+
+/* Apply a preset city and trigger an immediate refetch. */
+static void set_city(const city_t *c) {
+    SDL_LockMutex(cfg_lock);
+    CFG_LAT = c->lat;
+    CFG_LON = c->lon;
+    snprintf(CFG_CITY, sizeof(CFG_CITY), "%s", c->name);
+    SDL_UnlockMutex(cfg_lock);
+    g_refetch = 1;
 }
 
 /* ------------------------------ drawing ------------------------------ */
@@ -231,6 +280,39 @@ static void draw_icon(SDL_Renderer *r, WxCat cat, Uint32 now) {
     }
 }
 
+/* Location picker overlay: a scrollable list of preset cities. */
+static void draw_picker(SDL_Renderer *r, TTF_Font *font_sm, int sel, int scroll) {
+    SDL_SetRenderDrawColor(r, 10, 12, 20, 255);
+    SDL_RenderClear(r);
+
+    /* header */
+    SDL_SetRenderDrawColor(r, 12, 12, 14, 255);
+    SDL_Rect hd = { 0, 0, SCREEN_W, 20 };
+    SDL_RenderFillRect(r, &hd);
+    text(r, font_sm, "Select Location", 8, 3, COL_ACCENT, AL_L);
+
+    const int row_h = 16;
+    const int list_y = 24;
+    const int rows_visible = (SCREEN_H - list_y - 16) / row_h;
+
+    for (int i = scroll; i < N_CITIES && i < scroll + rows_visible; i++) {
+        int y = list_y + (i - scroll) * row_h;
+        if (i == sel) {
+            SDL_SetRenderDrawColor(r, 0, 90, 110, 255);
+            SDL_Rect rb = { 4, y, SCREEN_W - 8, row_h - 1 };
+            SDL_RenderFillRect(r, &rb);
+        }
+        SDL_Color c = (i == sel) ? (SDL_Color){255,255,255,255} : COL_FG;
+        text(r, font_sm, CITIES[i].name, 12, y + 1, c, AL_L);
+    }
+    if (N_CITIES > rows_visible) {
+        text(r, font_sm, (scroll + rows_visible < N_CITIES) ? "v" : " ",
+             SCREEN_W - 14, SCREEN_H - 30, COL_DIM, AL_L);
+    }
+    text(r, font_sm, "arrows  ENTER select  ESC back", 6, SCREEN_H - 14, COL_DIM, AL_L);
+    SDL_RenderPresent(r);
+}
+
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
 
@@ -262,21 +344,50 @@ int main(int argc, char **argv) {
     TTF_Font *font_lg = TTF_OpenFont(FONT_PATH_2, 48);
     if (!font_lg) font_lg = TTF_OpenFont(FONT_PATH_1, 48);
 
-    g.lock = SDL_CreateMutex();
+    g.lock  = SDL_CreateMutex();
+    cfg_lock = SDL_CreateMutex();
     g.ok = 0;
     snprintf(g.err, sizeof(g.err), "fetching...");
     SDL_Thread *th = SDL_CreateThread(fetch_thread, "fetch", NULL);
+
+    enum { MODE_WEATHER, MODE_PICKER } mode = MODE_WEATHER;
+    int pick_sel = 0, pick_scroll = 0;
+    /* Preselect the preset matching the current city, if any. */
+    for (int i = 0; i < N_CITIES; i++)
+        if (strcmp(CITIES[i].name, CFG_CITY) == 0) { pick_sel = i; break; }
+    const int PICK_ROWS = (SCREEN_H - 24 - 16) / 16;
 
     int running = 1;
     while (running) {
         Uint32 now = SDL_GetTicks();
         SDL_Event ev;
         while (SDL_PollEvent(&ev)) {
-            if (ev.type == SDL_QUIT) running = 0;
-            else if (ev.type == SDL_KEYDOWN) {
-                SDL_Keycode k = ev.key.keysym.sym;
+            if (ev.type == SDL_QUIT) { running = 0; continue; }
+            if (ev.type != SDL_KEYDOWN) continue;
+            SDL_Keycode k = ev.key.keysym.sym;
+            if (mode == MODE_WEATHER) {
                 if (k == SDLK_ESCAPE || k == SDLK_q) running = 0;
+                else if (k == SDLK_l || k == SDLK_m || k == SDLK_RETURN) {
+                    mode = MODE_PICKER;              /* open location picker */
+                }
+            } else { /* MODE_PICKER */
+                if (k == SDLK_ESCAPE) mode = MODE_WEATHER;
+                else if (k == SDLK_UP)   pick_sel = (pick_sel + N_CITIES - 1) % N_CITIES;
+                else if (k == SDLK_DOWN) pick_sel = (pick_sel + 1) % N_CITIES;
+                else if (k == SDLK_RETURN || k == SDLK_KP_ENTER) {
+                    set_city(&CITIES[pick_sel]);
+                    mode = MODE_WEATHER;
+                }
+                if (pick_sel < pick_scroll) pick_scroll = pick_sel;
+                if (pick_sel >= pick_scroll + PICK_ROWS) pick_scroll = pick_sel - PICK_ROWS + 1;
             }
+        }
+
+        if (mode == MODE_PICKER) {
+            draw_picker(ren, font_sm, pick_sel, pick_scroll);
+            Uint32 elp = SDL_GetTicks() - now;
+            if (elp < TICK_MS) SDL_Delay(TICK_MS - elp);
+            continue;
         }
 
         WxState s;
@@ -284,10 +395,16 @@ int main(int argc, char **argv) {
         s = g;
         SDL_UnlockMutex(g.lock);
 
+        char city[48];
+        SDL_LockMutex(cfg_lock);
+        snprintf(city, sizeof(city), "%s", CFG_CITY);
+        SDL_UnlockMutex(cfg_lock);
+
         SDL_SetRenderDrawColor(ren, 10, 12, 20, 255);
         SDL_RenderClear(ren);
 
-        text(ren, font_sm, CFG_CITY, SCREEN_W / 2, 6, COL_ACCENT, AL_C);
+        text(ren, font_sm, city, SCREEN_W / 2, 6, COL_ACCENT, AL_C);
+        text(ren, font_sm, "L:loc", 4, 4, COL_DIM, AL_L);
 
         WxCat cat = s.ok ? wx_category(s.code) : WX_CLOUD;
         draw_icon(ren, cat, now);
@@ -314,6 +431,7 @@ int main(int argc, char **argv) {
     g_running = 0;
     SDL_WaitThread(th, NULL);
     SDL_DestroyMutex(g.lock);
+    SDL_DestroyMutex(cfg_lock);
     curl_global_cleanup();
     if (font_sm) TTF_CloseFont(font_sm);
     if (font_lg) TTF_CloseFont(font_lg);
