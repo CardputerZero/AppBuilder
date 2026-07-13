@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Launcher for the Python czdev CLI (login / logout / bump / publish / unpublish).
+# Requires only Python 3 — no Rust toolchain needed.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+PYTHON="${PYTHON:-python3}"
+if ! command -v "$PYTHON" >/dev/null 2>&1; then
+    echo "error: python3 not found. Install Python 3 to use czdev." >&2
+    exit 1
+fi
+
+PYTHONPATH="$SCRIPT_DIR/scripts${PYTHONPATH:+:$PYTHONPATH}" exec "$PYTHON" -m czdev "$@"
