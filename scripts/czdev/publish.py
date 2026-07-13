@@ -3,7 +3,6 @@
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import auth
+from .debver import compare_versions
 from .github_client import GitHubClient, Permission
 
 TARGET_OWNER = "CardputerZero"
@@ -88,10 +88,18 @@ def run(deb: Optional[str] = None):
         print(f"You don't have write access to {TARGET_OWNER}/{TARGET_REPO}.")
         print("  → Forking to your account...  ", end="", flush=True)
         fork_name = gh.fork_repo(TARGET_OWNER, TARGET_REPO)
-        print(f"done ({fork_name})")
         parts = fork_name.split("/")
         push_owner = parts[0]
         push_repo = parts[1]
+        # Forking is asynchronous; wait until the fork is actually usable,
+        # then fast-forward its main so we branch off a fresh base.
+        if not gh.wait_for_branch(push_owner, push_repo, "main"):
+            print("failed", flush=True)
+            print(f"ERROR: fork {fork_name} did not become ready in time. Retry in a minute.",
+                  file=sys.stderr)
+            sys.exit(1)
+        gh.sync_fork(push_owner, push_repo, "main")
+        print(f"done ({fork_name})")
         branch = branch_name(meta)
         pr_head = f"{user.login}:{branch}"
 
@@ -106,7 +114,9 @@ def run(deb: Optional[str] = None):
     manifest_name = f"{asset_name}.release.json"
     manifest_path_in_repo = f"pool/main/{meta['package']}/{manifest_name}"
     branch = branch_name(meta)
-    remote_url = f"git@github.com:{push_owner}/{push_repo}.git"
+    # Push over HTTPS with the OAuth token so publishing works with just
+    # `czdev login` — no SSH key setup required.
+    remote_url = f"https://x-access-token:{token}@github.com/{push_owner}/{push_repo}.git"
 
     # 1) Upload the .deb to a buffer Release on the push target. For third-party
     #    contributors this is their own fork — it uses THEIR free Release storage
@@ -134,15 +144,20 @@ def run(deb: Optional[str] = None):
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="czdev-publish-"))
     try:
-        run_cmd_in(tmp_dir, ["git", "init"])
-        run_cmd_in(tmp_dir, ["git", "remote", "add", "origin", remote_url])
+        run_cmd_in(tmp_dir, ["git", "init"], secret=token)
+        # A local identity so `git commit` works even without global git config;
+        # the noreply address also matches the maintainer-email review checks.
+        run_cmd_in(tmp_dir, ["git", "config", "user.name", user.login], secret=token)
+        run_cmd_in(tmp_dir, ["git", "config", "user.email", noreply], secret=token)
+        run_cmd_in(tmp_dir, ["git", "remote", "add", "origin", remote_url], secret=token)
 
         print("  → git fetch (minimal)... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "fetch", "--depth=1", "--filter=blob:none", "origin", "main"])
+        run_cmd_in(tmp_dir, ["git", "fetch", "--depth=1", "--filter=blob:none", "origin", "main"],
+                   secret=token)
         print("done")
 
         print(f"  → Creating branch {branch}... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "checkout", "-b", branch, "origin/main"])
+        run_cmd_in(tmp_dir, ["git", "checkout", "-b", branch, "origin/main"], secret=token)
         print("done")
 
         dest_dir = tmp_dir / "pool" / "main" / meta["package"]
@@ -170,13 +185,14 @@ def run(deb: Optional[str] = None):
         (dest_dir / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
 
         print("  → Creating commit... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "add", f"pool/main/{meta['package']}"])
+        run_cmd_in(tmp_dir, ["git", "add", f"pool/main/{meta['package']}"], secret=token)
         run_cmd_in(tmp_dir, ["git", "commit", "-m",
-                             f"publish: {meta['package']} {meta['version']} ({meta['architecture']})"])
+                             f"publish: {meta['package']} {meta['version']} ({meta['architecture']})"],
+                   secret=token)
         print("done")
 
         print("  → Pushing branch... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "push", "origin", branch])
+        run_cmd_in(tmp_dir, ["git", "push", "origin", branch], secret=token)
         print("done")
 
     finally:
@@ -368,18 +384,6 @@ def check_version_newer(meta: dict):
         print("  ✓ New package (no existing version found)")
 
 
-def compare_versions(a: str, b: str) -> int:
-    def parse(v):
-        return [int(x) for x in re.split(r'[.\-~]', v) if x.isdigit()]
-
-    pa, pb = parse(a), parse(b)
-    if pa > pb:
-        return 1
-    elif pa < pb:
-        return -1
-    return 0
-
-
 def check_git_installed():
     try:
         subprocess.run(["git", "--version"], capture_output=True, check=True)
@@ -388,9 +392,14 @@ def check_git_installed():
         sys.exit(1)
 
 
-def run_cmd_in(cwd: Path, cmd: list):
+def run_cmd_in(cwd: Path, cmd: list, secret: Optional[str] = None):
     result = subprocess.run(cmd, cwd=str(cwd), capture_output=True, text=True)
     if result.returncode != 0:
         cmd_str = " ".join(cmd)
-        print(f"ERROR: {cmd_str} failed:\n{result.stderr}", file=sys.stderr)
+        stderr = result.stderr
+        # Never echo the OAuth token (it may appear in remote URLs).
+        if secret:
+            cmd_str = cmd_str.replace(secret, "***")
+            stderr = stderr.replace(secret, "***")
+        print(f"ERROR: {cmd_str} failed:\n{stderr}", file=sys.stderr)
         sys.exit(1)

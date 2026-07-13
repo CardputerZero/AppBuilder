@@ -1,11 +1,12 @@
 """Show next version (patch bump) for a package — mirrors the Rust bump module."""
 
-import re
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+from .debver import compare_versions
 
 PACKAGES_INDEX_URL = "https://cardputerzero.github.io/packages/dists/stable/main/binary-arm64/Packages"
 
@@ -101,14 +102,3 @@ def bump_patch(version: str) -> str:
         except ValueError:
             patch = 0
         return f"{parts[0]}.{parts[1]}.{patch + 1}"
-
-
-def compare_versions(a: str, b: str) -> int:
-    def parse(v):
-        return [int(x) for x in re.split(r'[.\-~]', v) if x.isdigit()]
-    pa, pb = parse(a), parse(b)
-    if pa > pb:
-        return 1
-    elif pa < pb:
-        return -1
-    return 0
