@@ -165,7 +165,8 @@ Publishing uses the Python-based `czdev` wrapper (no Rust toolchain needed):
 ./czdev unpublish my_app --version 1.0.1
 ```
 
-Requirements: Python 3, `git`, `git-lfs`, `dpkg-deb`.
+Requirements: Python 3, `git`, `dpkg-deb`. No SSH key needed — pushes use the
+GitHub token obtained by `./czdev login`.
 
 #### Publish Workflow
 
@@ -207,7 +208,8 @@ Requirements: Python 3, `git`, `git-lfs`, `dpkg-deb`.
       │── czdev publish ───────────▶│                             │
       │                             │── validate .deb ──────────▶│ (check ver)
       │                             │── fork packages repo ─────▶│
-      │                             │── git push (LFS) ─────────▶│
+      │                             │── upload .deb (Release) ──▶│
+      │                             │── git push (metadata) ────▶│
       │                             │── POST /pulls ────────────▶│
       │◀── PR URL ─────────────────│                             │
       │                             │                             │
