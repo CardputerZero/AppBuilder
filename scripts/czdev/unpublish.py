@@ -88,6 +88,13 @@ def run(package: str, version: str, arch: str = "arm64"):
         parts = fork_name.split("/")
         push_owner = parts[0]
         push_repo = parts[1]
+        # Forking is asynchronous; wait for the fork and sync it so the
+        # removal commit is created on a current base.
+        if not gh.wait_for_branch(push_owner, push_repo, "main"):
+            print(f"ERROR: fork {fork_name} did not become ready in time. Retry in a minute.",
+                  file=sys.stderr)
+            sys.exit(1)
+        gh.sync_fork(push_owner, push_repo, "main")
         branch = branch_name(package, version)
         pr_head = f"{user.login}:{branch}"
 

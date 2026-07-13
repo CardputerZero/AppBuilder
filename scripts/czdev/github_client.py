@@ -1,5 +1,6 @@
 """GitHub API client — mirrors the Rust GitHubClient."""
 
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -78,6 +79,33 @@ class GitHubClient:
     def fork_repo(self, owner: str, repo: str) -> str:
         data = self._post(f"/repos/{owner}/{repo}/forks", body={})
         return data["full_name"]
+
+    def wait_for_branch(self, owner: str, repo: str, branch: str,
+                        timeout_secs: int = 90) -> bool:
+        """Poll until `branch` exists (forking is asynchronous on GitHub)."""
+        deadline = time.time() + timeout_secs
+        while True:
+            try:
+                self.get_ref_sha(owner, repo, f"heads/{branch}")
+                return True
+            except urllib.error.HTTPError as e:
+                if e.code not in (404, 409):  # 409: repository is empty (still forking)
+                    raise
+            if time.time() >= deadline:
+                return False
+            time.sleep(3)
+
+    def sync_fork(self, owner: str, repo: str, branch: str = "main") -> bool:
+        """Fast-forward a fork's branch from upstream (best effort).
+
+        Returns False when GitHub cannot fast-forward (e.g. diverged fork);
+        callers may still proceed — the PR diff is computed against upstream.
+        """
+        try:
+            self._post(f"/repos/{owner}/{repo}/merge-upstream", body={"branch": branch})
+            return True
+        except urllib.error.HTTPError:
+            return False
 
     def get_ref_sha(self, owner: str, repo: str, ref_name: str) -> str:
         data = self._get(f"/repos/{owner}/{repo}/git/ref/{ref_name}")
