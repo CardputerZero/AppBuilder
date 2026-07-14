@@ -1,0 +1,10 @@
+{
+  "name": "cardputerzero-dev-portal",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "dev": "wrangler dev --cwd worker",
+    "deploy": "wrangler deploy --cwd worker"
+  }
+}

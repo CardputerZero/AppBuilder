@@ -1,0 +1,272 @@
+# Copy to CardputerZero/packages: .github/workflows/process-web-submission.yml
+#
+# Handles `repository_dispatch` (type: web-submission) sent by the developer
+# portal Worker. Authoritative validation with real dpkg-deb: integrity,
+# control fields, .desktop, structure & safety scan, maintainer-email
+# ownership (first submitter owns the package name; admins bypass), and
+# version monotonicity. On success it opens a publish PR (and can auto-merge
+# it when AUTO_MERGE is true); on failure it opens an issue mentioning the
+# submitter.
+
+name: Process Web Submission
+
+on:
+  repository_dispatch:
+    types: [web-submission]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+env:
+  # Set to "false" to require a human maintainer to merge every publish PR.
+  AUTO_MERGE: "true"
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev jq zstd
+
+      - name: Download and validate .deb
+        id: validate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEB_URL: ${{ github.event.client_payload.url }}
+          WANT_SHA: ${{ github.event.client_payload.sha256 }}
+          SUBMITTER: ${{ github.event.client_payload.login }}
+          # JSON array of the submitter's verified emails (from the Worker,
+          # which read them via the user's OAuth token — trusted).
+          EMAILS_JSON: ${{ toJSON(github.event.client_payload.emails) }}
+          IS_ADMIN: ${{ github.event.client_payload.is_admin }}
+        run: |
+          set -uo pipefail
+          ERR=""
+          curl -fL --retry 3 --max-time 600 -o /tmp/pkg.deb "$DEB_URL" || ERR="- ❌ could not download the uploaded .deb\n"
+          if [ -f /tmp/pkg.deb ]; then
+            GOT=$(sha256sum /tmp/pkg.deb | awk '{print $1}')
+            [ "$GOT" = "$WANT_SHA" ] || ERR="${ERR}- ❌ sha256 mismatch\n"
+            PKG=$(dpkg-deb -f /tmp/pkg.deb Package 2>/dev/null || true)
+            VER=$(dpkg-deb -f /tmp/pkg.deb Version 2>/dev/null || true)
+            ARCH=$(dpkg-deb -f /tmp/pkg.deb Architecture 2>/dev/null || true)
+            MAINT=$(dpkg-deb -f /tmp/pkg.deb Maintainer 2>/dev/null || true)
+            [ -n "$PKG" ] || ERR="${ERR}- ❌ not a valid .deb\n"
+            echo "$PKG" | grep -qP '^[a-z0-9][a-z0-9.+\-]+$' || ERR="${ERR}- ❌ invalid package name '$PKG'\n"
+            case "$ARCH" in arm64|all) ;; *) ERR="${ERR}- ❌ architecture must be arm64/all, got '$ARCH'\n" ;; esac
+
+            dpkg-deb -c /tmp/pkg.deb > /tmp/contents.txt 2>/dev/null || true
+            grep -q 'usr/share/APPLaunch/applications/.*\.desktop$' /tmp/contents.txt \
+              || ERR="${ERR}- ❌ missing usr/share/APPLaunch/applications/*.desktop\n"
+
+            # --- structure & safety scan ---
+            # setuid/setgid bits in the archive listing (perm string like -rwsr-xr-x)
+            if awk '{print $1}' /tmp/contents.txt | grep -qE '^[-l].{2}[sS]|^[-l].{5}[sS]'; then
+              ERR="${ERR}- ❌ package contains setuid/setgid files\n"
+            fi
+            # device files
+            if awk '{print $1}' /tmp/contents.txt | grep -qE '^[bc]'; then
+              ERR="${ERR}- ❌ package contains device files\n"
+            fi
+            # paths outside the allowed prefixes
+            BAD_PATHS=$(awk '{print $NF}' /tmp/contents.txt | sed 's|^\./||' \
+              | grep -vE '^(usr/share/APPLaunch/|lib/systemd/system/|usr/share/doc/|usr/share/'"$PKG"'/|usr/lib/'"$PKG"'/|opt/'"$PKG"'/|usr/$|usr/share/$|usr/lib/$|lib/$|lib/systemd/$|opt/$|\.$)' \
+              | grep -v '/$' || true)
+            if [ -n "$BAD_PATHS" ]; then
+              ERR="${ERR}- ❌ files outside allowed install prefixes:\n$(echo "$BAD_PATHS" | sed 's/^/    /')\n"
+            fi
+            # maintainer scripts: dangerous patterns
+            dpkg-deb -e /tmp/pkg.deb /tmp/ctrl 2>/dev/null || true
+            for scr in preinst postinst prerm postrm; do
+              [ -f "/tmp/ctrl/$scr" ] || continue
+              if grep -qE 'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*(/([[:space:]]|$)|/(bin|etc|usr|var|home|boot|lib))|(curl|wget)[^|]*\|[[:space:]]*(ba)?sh|mkfs|/etc/(passwd|shadow|sudoers)|dd[[:space:]][^|]*of=/dev/' "/tmp/ctrl/$scr"; then
+                ERR="${ERR}- ❌ dangerous pattern in maintainer script $scr\n"
+              fi
+            done
+
+            # --- ownership: maintainer email must be one of the submitter's
+            #     verified emails; existing packages only updatable by owner/admin ---
+            EMAIL=$(echo "$MAINT" | grep -oP '<\K[^>]+' || echo "$MAINT")
+            EMAIL=$(echo "$EMAIL" | tr '[:upper:]' '[:lower:]')
+            MATCH=$(echo "$EMAILS_JSON" | jq --arg e "$EMAIL" 'map(ascii_downcase) | contains([$e])')
+            if [ "$MATCH" != "true" ] && [ "$IS_ADMIN" != "true" ]; then
+              ERR="${ERR}- ❌ Maintainer email \`$EMAIL\` is not one of @$SUBMITTER's verified GitHub emails\n"
+            fi
+
+            EXISTING="" ; OWNER_EMAIL=""
+            for m in pool/main/"$PKG"/*.deb.release.json; do
+              [ -f "$m" ] || continue
+              v=$(jq -r '.version // empty' "$m")
+              if [ -n "$v" ] && { [ -z "$EXISTING" ] || dpkg --compare-versions "$v" gt "$EXISTING"; }; then
+                EXISTING="$v"
+                u=$(jq -r '.url // empty' "$m")
+                if [ -n "$u" ] && curl -fsL --max-time 300 -o /tmp/existing.deb "$u" 2>/dev/null; then
+                  OWNER_EMAIL=$(dpkg-deb -f /tmp/existing.deb Maintainer 2>/dev/null | grep -oP '<\K[^>]+' | tr '[:upper:]' '[:lower:]' || true)
+                fi
+              fi
+            done
+            if [ -n "$OWNER_EMAIL" ] && [ "$IS_ADMIN" != "true" ]; then
+              OWNED=$(echo "$EMAILS_JSON" | jq --arg e "$OWNER_EMAIL" 'map(ascii_downcase) | contains([$e])')
+              if [ "$OWNED" != "true" ]; then
+                ERR="${ERR}- ❌ package '$PKG' is owned by \`$OWNER_EMAIL\`; only the owner or an admin can update it\n"
+              fi
+            fi
+            if [ -n "$EXISTING" ] && dpkg --compare-versions "$VER" le "$EXISTING"; then
+              ERR="${ERR}- ❌ version $VER is not newer than published $EXISTING\n"
+            fi
+            { echo "pkg=$PKG"; echo "ver=$VER"; echo "arch=$ARCH"; } >> "$GITHUB_OUTPUT"
+          fi
+          printf 'errors<<EOM\n%b\nEOM\n' "$ERR" >> "$GITHUB_OUTPUT"
+
+      - name: Collect store metadata
+        id: meta
+        if: steps.validate.outputs.errors == ''
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+          PKG: ${{ steps.validate.outputs.pkg }}
+        run: |
+          set -uo pipefail
+          ERR=""
+          if [ -n "$SOURCE_REPO" ]; then
+            git clone --depth=1 "$SOURCE_REPO" /tmp/src 2>/dev/null || ERR="- ❌ could not clone source repo\n"
+          fi
+          if [ -z "$ERR" ]; then
+            python3 - <<'EOF' || ERR="- ❌ $(cat /tmp/meta-error.txt 2>/dev/null || echo metadata collection failed)\n"
+          import json, os, shutil, subprocess, sys
+          from pathlib import Path
+
+          def fail(msg):
+              Path("/tmp/meta-error.txt").write_text(msg)
+              sys.exit(1)
+
+          pkg = os.environ["PKG"]
+          dest = Path(f"pool/main/{pkg}")
+          dest.mkdir(parents=True, exist_ok=True)
+
+          # Preferred: app-builder.json store section from the source repo.
+          src_root = Path("/tmp/src")
+          if src_root.is_dir():
+              for mf in src_root.rglob("app-builder.json"):
+                  try:
+                      raw = json.loads(mf.read_text())
+                  except Exception:
+                      continue
+                  if raw.get("package_name") != pkg or "store" not in raw:
+                      continue
+                  store, app_dir = raw["store"], mf.parent
+                  meta = {"title": raw.get("app_name", ""),
+                          "summary": store.get("summary", ""),
+                          "categories": store.get("categories", []),
+                          "screenshots": store.get("screenshots", [])}
+                  for k in ("description", "locales", "license", "source_repo", "icon", "permissions"):
+                      if store.get(k):
+                          meta[k] = store[k]
+                  shots = dest / "screenshots"
+                  shots.mkdir(exist_ok=True)
+                  for srel in meta["screenshots"]:
+                      p = app_dir / srel
+                      if not p.is_file():
+                          fail(f"screenshot not found in source repo: {srel}")
+                      shutil.copy2(p, shots / p.name)
+                  if store.get("icon") and (app_dir / store["icon"]).is_file():
+                      shutil.copy2(app_dir / store["icon"], dest / Path(store["icon"]).name)
+                  (dest / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+                  sys.exit(0)
+
+          # Fallback: build minimal metadata from the deb itself (.desktop + icon).
+          out = subprocess.run(["dpkg-deb", "--fsys-tarfile", "/tmp/pkg.deb"], capture_output=True, check=True)
+          import io, tarfile
+          tf = tarfile.open(fileobj=io.BytesIO(out.stdout))
+          desktop, icon_member = None, None
+          members = {m.name.lstrip("./"): m for m in tf.getmembers()}
+          for name, m in members.items():
+              if name.startswith("usr/share/APPLaunch/applications/") and name.endswith(".desktop"):
+                  desktop = tf.extractfile(m).read().decode(errors="replace")
+                  break
+          title, icon_rel = pkg, None
+          if desktop:
+              for line in desktop.splitlines():
+                  if line.startswith("Name="):
+                      title = line.split("=", 1)[1].strip()
+                  if line.startswith("Icon="):
+                      icon_rel = line.split("=", 1)[1].strip().lstrip("/")
+          if icon_rel:
+              for cand in (icon_rel, f"usr/share/APPLaunch/{icon_rel}"):
+                  if cand in members:
+                      data = tf.extractfile(members[cand]).read()
+                      (dest / Path(cand).name).write_bytes(data)
+                      icon_rel = Path(cand).name
+                      break
+              else:
+                  icon_rel = None
+          desc = subprocess.run(["dpkg-deb", "-f", "/tmp/pkg.deb", "Description"],
+                                capture_output=True, text=True).stdout.strip()
+          meta = {"title": title, "summary": desc.splitlines()[0] if desc else "",
+                  "categories": [], "screenshots": []}
+          if icon_rel:
+              meta["icon"] = icon_rel
+          (dest / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+          EOF
+          fi
+          printf 'errors<<EOM\n%b\nEOM\n' "$ERR" >> "$GITHUB_OUTPUT"
+
+      - name: Create publish PR
+        id: pr
+        if: steps.validate.outputs.errors == '' && steps.meta.outputs.errors == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEB_URL: ${{ github.event.client_payload.url }}
+          WANT_SHA: ${{ github.event.client_payload.sha256 }}
+          SIZE: ${{ github.event.client_payload.size }}
+          SUBMITTER: ${{ github.event.client_payload.login }}
+          PKG: ${{ steps.validate.outputs.pkg }}
+          VER: ${{ steps.validate.outputs.ver }}
+          ARCH: ${{ steps.validate.outputs.arch }}
+        run: |
+          set -euo pipefail
+          NAME="${PKG}_${VER}_${ARCH}.deb"
+          ASSET_NAME="${NAME//\~/.}"
+          jq -n --arg f "$ASSET_NAME" --arg u "$DEB_URL" --arg s "$WANT_SHA" \
+                --arg p "$PKG" --arg v "$VER" --arg a "$ARCH" --argjson z "$SIZE" \
+                '{filename:$f,url:$u,sha256:$s,size:$z,package:$p,version:$v,architecture:$a}' \
+                > "pool/main/$PKG/$ASSET_NAME.release.json"
+          BRANCH="publish/${PKG}-${VER}-web-${{ github.run_id }}"
+          git config user.name "cardputerzero-bot"
+          git config user.email "cardputerzero-bot@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add "pool/main/$PKG"
+          git commit -m "publish: $PKG $VER ($ARCH) via developer portal by @$SUBMITTER"
+          git push origin "$BRANCH"
+          PR_URL=$(gh pr create --base main --head "$BRANCH" \
+            --title "publish: $PKG $VER (portal submission by @$SUBMITTER)" \
+            --body "$(printf 'Submitted by @%s via the developer portal.\n\n| Field | Value |\n|---|---|\n| Version | %s |\n| Architecture | %s |\n| SHA-256 | `%s` |\n| Binary | [%s](%s) |\n\nAll automated checks passed in [this run](%s/%s/actions/runs/%s).' \
+              "$SUBMITTER" "$VER" "$ARCH" "$WANT_SHA" "$ASSET_NAME" "$DEB_URL" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}")")
+          echo "url=$PR_URL" >> "$GITHUB_OUTPUT"
+          if [ "$AUTO_MERGE" = "true" ]; then
+            gh pr merge "$PR_URL" --squash --delete-branch || echo "::warning::auto-merge failed; awaiting manual review"
+          fi
+
+      - name: Report failure to the submitter
+        if: always() && (steps.validate.outputs.errors != '' || steps.meta.outputs.errors != '' || failure())
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBMITTER: ${{ github.event.client_payload.login }}
+          FILENAME: ${{ github.event.client_payload.filename }}
+          ERR1: ${{ steps.validate.outputs.errors }}
+          ERR2: ${{ steps.meta.outputs.errors }}
+        run: |
+          {
+            echo "@$SUBMITTER your portal submission of \`$FILENAME\` failed validation:"
+            echo
+            printf '%b%b' "$ERR1" "$ERR2"
+            echo
+            echo "Details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "Fix the package and upload again at https://dev.cardputer.cc"
+          } > /tmp/issue.md
+          gh issue create \
+            --title "portal submission failed: $FILENAME" \
+            --body-file /tmp/issue.md

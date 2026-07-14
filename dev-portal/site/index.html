@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>开发者中心 · CardputerZero AppStore</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0f0a; --panel: #101810; --panel2: #0d140d; --line: #1f3320;
+      --text: #cfe8cf; --dim: #7fa77f; --accent: #3ddc5a; --warn: #f5c542; --danger: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 14px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    }
+    header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 22px; border-bottom: 1px solid var(--line);
+    }
+    header h1 { font-size: 15px; margin: 0; color: var(--accent); }
+    header .who { font-size: 13px; color: var(--dim); }
+    header .who a { color: var(--dim); }
+    main { max-width: 860px; margin: 0 auto; padding: 24px 16px 60px; }
+    .tabs { display: flex; gap: 8px; margin-bottom: 18px; }
+    .tabs button {
+      background: transparent; border: 1px solid var(--line); color: var(--dim);
+      padding: 8px 18px; border-radius: 6px; font: inherit; cursor: pointer;
+    }
+    .tabs button.active { color: var(--accent); border-color: var(--accent); }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 22px; }
+    .hidden { display: none !important; }
+    label { display: block; margin: 14px 0 6px; font-size: 13px; color: var(--dim); }
+    input[type="url"] {
+      width: 100%; padding: 10px 12px; border-radius: 6px;
+      border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit;
+    }
+    .drop {
+      border: 1.5px dashed var(--line); border-radius: 8px; padding: 30px 16px;
+      text-align: center; color: var(--dim); cursor: pointer; transition: border-color .15s;
+    }
+    .drop.hover, .drop:hover { border-color: var(--accent); color: var(--text); }
+    button.primary {
+      margin-top: 18px; width: 100%; padding: 12px; border: 0; border-radius: 6px;
+      background: var(--accent); color: #04220b; font: inherit; font-weight: 700; cursor: pointer;
+    }
+    button.primary:disabled { opacity: .4; cursor: not-allowed; }
+    .preview { display: flex; gap: 16px; margin-top: 18px; padding: 16px;
+      background: var(--panel2); border: 1px solid var(--line); border-radius: 8px; }
+    .preview img { width: 64px; height: 64px; border-radius: 12px; background: #000;
+      object-fit: contain; image-rendering: pixelated; }
+    .preview .noicon { width: 64px; height: 64px; border-radius: 12px; background: #000;
+      display: flex; align-items: center; justify-content: center; color: var(--dim); font-size: 11px; }
+    .kv { font-size: 13px; }
+    .kv div { margin: 2px 0; }
+    .kv b { color: var(--accent); font-weight: 600; }
+    .kv .dim { color: var(--dim); }
+    .report { margin-top: 14px; font-size: 13px; }
+    .report li { list-style: none; margin: 3px 0; }
+    .report ul { padding: 0; margin: 6px 0; }
+    .lv-pass::before { content: "✓ "; color: var(--accent); }
+    .lv-info::before { content: "· "; color: var(--dim); }
+    .lv-warn::before { content: "⚠ "; color: var(--warn); }
+    .lv-warn { color: var(--warn); }
+    .lv-danger::before { content: "✗ "; color: var(--danger); }
+    .lv-danger { color: var(--danger); }
+    details { margin-top: 12px; font-size: 13px; color: var(--dim); }
+    details pre { max-height: 260px; overflow: auto; background: var(--bg);
+      padding: 10px; border-radius: 6px; border: 1px solid var(--line); }
+    .status { margin-top: 14px; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+    .status.err { color: var(--danger); }
+    .status.ok { color: var(--accent); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+    th { color: var(--dim); font-weight: 500; }
+    td button { background: transparent; border: 1px solid var(--danger); color: var(--danger);
+      border-radius: 5px; padding: 4px 12px; font: inherit; font-size: 12px; cursor: pointer; }
+    .login-box { text-align: center; padding: 48px 20px; }
+    .login-box button { width: auto; padding: 12px 40px; }
+    .muted { color: var(--dim); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>CardputerZero 开发者中心</h1>
+    <span class="who hidden" id="who-box"><b id="who"></b> · <a href="/auth/logout">退出</a></span>
+  </header>
+
+  <main>
+    <!-- 未登录 -->
+    <section id="login-view" class="panel login-box hidden">
+      <p>上传 / 管理 AppStore 软件包需要 GitHub 登录。<br>
+      <span class="muted">我们通过 GitHub 校验你的已验证邮箱：包的 Maintainer 邮箱必须是你本人，<br>
+      同名包只有原作者（或管理员）可以更新和下架。</span></p>
+      <button class="primary" onclick="location.href='/auth/login'">使用 GitHub 登录</button>
+    </section>
+
+    <!-- 已登录 -->
+    <section id="app-view" class="hidden">
+      <div class="tabs">
+        <button id="tab-upload" class="active">上传软件包</button>
+        <button id="tab-mine">我的软件包</button>
+      </div>
+
+      <!-- 上传 -->
+      <div class="panel" id="upload-panel">
+        <div class="drop" id="drop">
+          <input id="file" type="file" accept=".deb" class="hidden">
+          <span id="drop-text">拖拽 <b>.deb</b> 到这里，或点击选择文件<br>
+            <span class="muted">选择后立即在本地解析，不会上传</span></span>
+        </div>
+
+        <div id="preview-box" class="hidden">
+          <div class="preview">
+            <img id="p-icon" class="hidden" alt="app icon">
+            <div id="p-noicon" class="noicon">无图标</div>
+            <div class="kv">
+              <div><b id="p-name"></b> <span class="dim" id="p-pkg"></span></div>
+              <div>版本 <b id="p-version"></b> · <span id="p-arch"></span> · 安装体积 <span id="p-size"></span></div>
+              <div class="dim">Maintainer: <span id="p-maint"></span></div>
+              <div class="dim" id="p-emailmatch"></div>
+              <div class="dim" id="p-verstate"></div>
+            </div>
+          </div>
+
+          <div class="report">
+            <b>初步检查报告</b>
+            <ul id="report-list"></ul>
+          </div>
+
+          <details><summary>文件清单（<span id="p-filecount"></span> 个文件）</summary><pre id="p-files"></pre></details>
+          <details id="p-scripts-box" class="hidden"><summary>maintainer 脚本内容</summary><pre id="p-scripts"></pre></details>
+
+          <label for="source-repo">源码仓库（可选，公开仓库；含 app-builder.json 的 store 段可自动带入截图等商店信息）</label>
+          <input id="source-repo" type="url" placeholder="https://github.com/you/your-app">
+
+          <button class="primary" id="submit-btn" disabled>提交到 AppStore</button>
+        </div>
+        <div class="status" id="status"></div>
+      </div>
+
+      <!-- 我的软件包 -->
+      <div class="panel hidden" id="mine-panel">
+        <table>
+          <thead><tr><th>包名</th><th>版本</th><th>Maintainer</th><th></th></tr></thead>
+          <tbody id="mine-rows"><tr><td colspan="4" class="muted">加载中…</td></tr></tbody>
+        </table>
+        <p class="muted">列表来自线上 APT 索引，只显示 Maintainer 邮箱属于你的包。下架会生成移除 PR。</p>
+      </div>
+    </section>
+  </main>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+name = "cardputerzero-dev-portal"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Portal page + API on the same origin (no CORS anywhere).
+routes = [
+  { pattern = "dev.cardputer.cc", custom_domain = true },
+]
+
+[assets]
+directory = "../site"
+binding = "ASSETS"
+
+[vars]
+RETURN_PATH = "/"
+TARGET_OWNER = "CardputerZero"
+TARGET_REPO = "packages"
+BUFFER_TAG = "web-upload-buffer"
+MAX_SIZE_MB = "64"
+PACKAGES_INDEX_URL = "https://cardputer.cc/packages/dists/stable/main/binary-arm64/Packages"
+# Comma-separated GitHub logins with admin power (can update/unpublish any package).
+ADMIN_LOGINS = ""
+
+# Secrets (wrangler secret put <NAME>):
+#   GITHUB_CLIENT_ID      OAuth App (callback: https://dev.cardputer.cc/auth/callback)
+#   GITHUB_CLIENT_SECRET
+#   BOT_TOKEN             fine-grained PAT, contents:write on CardputerZero/packages
+#   SESSION_SECRET        openssl rand -hex 32
