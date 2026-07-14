@@ -1,0 +1,171 @@
+<!doctype html>
+<!-- Copy to CardputerZero/cardputerzero.github.io as submit.html (or merge
+     into the hub SPA). Talks to the cardputer.cc submission Worker. -->
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>提交应用 · CardputerZero AppStore</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0a0f0a;
+      --panel: #101810;
+      --line: #1f3320;
+      --text: #cfe8cf;
+      --dim: #7fa77f;
+      --accent: #3ddc5a;
+      --danger: #ff6b6b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      background: var(--bg); color: var(--text);
+      font: 15px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      padding: 24px;
+    }
+    .card {
+      width: 100%; max-width: 560px; background: var(--panel);
+      border: 1px solid var(--line); border-radius: 10px; padding: 28px;
+    }
+    h1 { font-size: 18px; margin: 0 0 4px; color: var(--accent); }
+    p.sub { margin: 0 0 20px; color: var(--dim); font-size: 13px; }
+    label { display: block; margin: 16px 0 6px; font-size: 13px; color: var(--dim); }
+    input[type="url"] {
+      width: 100%; padding: 10px 12px; border-radius: 6px;
+      border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit;
+    }
+    .drop {
+      margin-top: 6px; border: 1.5px dashed var(--line); border-radius: 8px;
+      padding: 28px 16px; text-align: center; color: var(--dim); cursor: pointer;
+      transition: border-color .15s, color .15s;
+    }
+    .drop.hover, .drop:hover { border-color: var(--accent); color: var(--text); }
+    .drop strong { color: var(--text); }
+    button {
+      margin-top: 20px; width: 100%; padding: 12px; border: 0; border-radius: 6px;
+      background: var(--accent); color: #04220b; font: inherit; font-weight: 700; cursor: pointer;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .ghost { background: transparent; border: 1px solid var(--line); color: var(--text); font-weight: 400; }
+    .status { margin-top: 16px; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+    .status.err { color: var(--danger); }
+    .status.ok { color: var(--accent); }
+    .who { display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--dim); }
+    .who a { color: var(--dim); }
+    .hidden { display: none; }
+    ol.help { color: var(--dim); font-size: 13px; padding-left: 20px; margin: 12px 0 0; }
+    code { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>提交应用到 AppStore</h1>
+    <p class="sub">上传 <code>.deb</code> → 自动校验 → 生成发布 PR → 管理员审核上架</p>
+
+    <!-- 未登录 -->
+    <section id="login-view" class="hidden">
+      <p>提交需要 GitHub 身份（用于核对包的 Maintainer 邮箱、署名与后续沟通）。仅读取公开资料，不索取任何仓库权限。</p>
+      <button id="login-btn">使用 GitHub 登录</button>
+      <ol class="help">
+        <li>用 <a href="https://github.com/m5stack/CardputerZero-AppBuilder" target="_blank" rel="noopener">AppBuilder</a> 在线 CI 或本地构建 arm64 <code>.deb</code></li>
+        <li>确保源码仓库里有含 <code>store</code> 段与截图的 <code>app-builder.json</code></li>
+        <li>回到本页登录并上传</li>
+      </ol>
+    </section>
+
+    <!-- 已登录 -->
+    <section id="form-view" class="hidden">
+      <div class="who">
+        <span>已登录：<strong id="who"></strong></span>
+        <a id="logout" href="#">退出</a>
+      </div>
+
+      <label for="source-repo">应用源码仓库（含 app-builder.json）</label>
+      <input id="source-repo" type="url" placeholder="https://github.com/you/your-app" required>
+
+      <label>.deb 安装包（≤ 64 MB）</label>
+      <div class="drop" id="drop">
+        <input id="file" type="file" accept=".deb" class="hidden">
+        <span id="drop-text">拖拽 <strong>.deb</strong> 到这里，或点击选择文件</span>
+      </div>
+
+      <button id="submit-btn" disabled>提交审核</button>
+      <div class="status" id="status"></div>
+    </section>
+  </main>
+
+  <script>
+    const API = "https://api.cardputer.cc";
+
+    const $ = (id) => document.getElementById(id);
+    let file = null;
+
+    async function init() {
+      let me = null;
+      try {
+        const r = await fetch(`${API}/api/me`, { credentials: "include" });
+        if (r.ok) me = await r.json();
+      } catch (e) { /* API 不可达时按未登录展示 */ }
+      $(me ? "form-view" : "login-view").classList.remove("hidden");
+      if (me) $("who").textContent = me.login;
+    }
+
+    $("login-btn")?.addEventListener("click", () => location.href = `${API}/auth/login`);
+    $("logout").addEventListener("click", (e) => { e.preventDefault(); location.href = `${API}/auth/logout`; });
+
+    const drop = $("drop");
+    drop.addEventListener("click", () => $("file").click());
+    drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("hover"); });
+    drop.addEventListener("dragleave", () => drop.classList.remove("hover"));
+    drop.addEventListener("drop", (e) => {
+      e.preventDefault(); drop.classList.remove("hover");
+      pick(e.dataTransfer.files[0]);
+    });
+    $("file").addEventListener("change", (e) => pick(e.target.files[0]));
+
+    function pick(f) {
+      if (!f) return;
+      if (!f.name.endsWith(".deb")) return say("err", "请选择 .deb 文件");
+      file = f;
+      $("drop-text").innerHTML = `已选择 <strong>${f.name}</strong>（${(f.size / 1048576).toFixed(1)} MB）`;
+      $("submit-btn").disabled = false;
+      say("", "");
+    }
+
+    $("submit-btn").addEventListener("click", async () => {
+      const repo = $("source-repo").value.trim();
+      if (!repo) return say("err", "请填写源码仓库地址");
+      if (!file) return say("err", "请选择 .deb 文件");
+
+      $("submit-btn").disabled = true;
+      say("", "上传中… 文件较大时请耐心等待");
+
+      const body = new FormData();
+      body.append("deb", file);
+      body.append("source_repo", repo);
+
+      try {
+        const r = await fetch(`${API}/api/submit`, { method: "POST", credentials: "include", body });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.detail || data.error || `HTTP ${r.status}`);
+        say("ok",
+          `✓ 已提交，CI 正在校验。\n` +
+          `通过后会自动创建发布 PR 并 @ 你；若校验失败会开 issue 告诉你原因。\n` +
+          `跟踪进度：${data.track_url}`);
+      } catch (err) {
+        say("err", `提交失败：${err.message}`);
+        $("submit-btn").disabled = false;
+      }
+    });
+
+    function say(kind, text) {
+      const el = $("status");
+      el.className = `status ${kind}`;
+      el.textContent = text;
+    }
+
+    init();
+  </script>
+</body>
+</html>

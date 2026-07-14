@@ -1,0 +1,24 @@
+name = "cardputer-submit"
+main = "src/index.js"
+compatibility_date = "2026-07-01"
+
+# Attach the API to your own domain (zone must be on Cloudflare):
+routes = [
+  { pattern = "api.cardputer.cc", custom_domain = true },
+]
+
+[vars]
+# Origin of the static store site allowed to call this API.
+ALLOWED_ORIGIN = "https://cardputer.cc"
+# Where to send the browser back after login/logout.
+RETURN_URL = "https://cardputer.cc/submit.html"
+TARGET_OWNER = "CardputerZero"
+TARGET_REPO = "packages"
+BUFFER_TAG = "web-upload-buffer"
+MAX_SIZE_MB = "64"
+
+# Secrets (set via `wrangler secret put <NAME>`):
+#   GITHUB_CLIENT_ID      OAuth App client id (callback: https://api.cardputer.cc/auth/callback)
+#   GITHUB_CLIENT_SECRET  OAuth App client secret
+#   BOT_TOKEN             fine-grained PAT, contents:write on CardputerZero/packages
+#   SESSION_SECRET        long random string, e.g. `openssl rand -hex 32`

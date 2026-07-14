@@ -1,0 +1,187 @@
+# Copy to CardputerZero/packages: .github/workflows/process-web-submission.yml
+#
+# Handles `repository_dispatch` events sent by the cardputer.cc upload Worker
+# (online-submit/worker in CardputerZero-AppBuilder). Downloads the uploaded
+# .deb from the web-upload-buffer release, runs the same validation as
+# validate-pr.yml, collects store metadata from the developer's source repo,
+# and opens a publish PR for maintainer review. On failure it opens an issue
+# mentioning the submitter so they get actionable feedback.
+
+name: Process Web Submission
+
+on:
+  repository_dispatch:
+    types: [web-submission]
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev jq
+
+      - name: Download and validate .deb
+        id: validate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # client_payload values are produced by the trusted Worker, but they
+          # still only ever flow through env vars, never shell interpolation.
+          DEB_URL: ${{ github.event.client_payload.url }}
+          WANT_SHA: ${{ github.event.client_payload.sha256 }}
+          SUBMITTER: ${{ github.event.client_payload.login }}
+        run: |
+          set -euo pipefail
+          ERR=""
+          curl -fL --retry 3 --max-time 600 -o /tmp/pkg.deb "$DEB_URL" || ERR="- ❌ could not download the uploaded .deb\n"
+          if [ -f /tmp/pkg.deb ]; then
+            GOT=$(sha256sum /tmp/pkg.deb | awk '{print $1}')
+            [ "$GOT" = "$WANT_SHA" ] || ERR="${ERR}- ❌ sha256 mismatch (got \`$GOT\`)\n"
+            PKG=$(dpkg-deb -f /tmp/pkg.deb Package 2>/dev/null || true)
+            VER=$(dpkg-deb -f /tmp/pkg.deb Version 2>/dev/null || true)
+            ARCH=$(dpkg-deb -f /tmp/pkg.deb Architecture 2>/dev/null || true)
+            MAINT=$(dpkg-deb -f /tmp/pkg.deb Maintainer 2>/dev/null || true)
+            [ -n "$PKG" ] || ERR="${ERR}- ❌ not a valid .deb\n"
+            echo "$PKG" | grep -qP '^[a-z0-9][a-z0-9.+\-]+$' || ERR="${ERR}- ❌ invalid package name '$PKG'\n"
+            dpkg-deb -c /tmp/pkg.deb > /tmp/contents.txt 2>/dev/null || true
+            grep -q '\.desktop$' /tmp/contents.txt || ERR="${ERR}- ❌ missing .desktop file (all apps must include one)\n"
+
+            # Maintainer email must match the authenticated submitter.
+            EMAIL=$(echo "$MAINT" | grep -oP '<\K[^>]+' || echo "$MAINT")
+            NOREPLY="${SUBMITTER}@users.noreply.github.com"
+            PUB=$(gh api "users/$SUBMITTER" --jq '.email // empty' 2>/dev/null || true)
+            if [ "$EMAIL" != "$NOREPLY" ] && { [ -z "$PUB" ] || [ "$EMAIL" != "$PUB" ]; }; then
+              ERR="${ERR}- ❌ Maintainer \`$EMAIL\` does not match submitter \`$SUBMITTER\` (expected \`$NOREPLY\` or your public GitHub email)\n"
+            fi
+
+            # Version must be newer than the latest manifest on main.
+            EXISTING=""
+            for m in pool/main/"$PKG"/*.deb.release.json; do
+              [ -f "$m" ] || continue
+              v=$(jq -r '.version // empty' "$m")
+              if [ -n "$v" ] && { [ -z "$EXISTING" ] || dpkg --compare-versions "$v" gt "$EXISTING"; }; then EXISTING="$v"; fi
+            done
+            if [ -n "$EXISTING" ] && dpkg --compare-versions "$VER" le "$EXISTING"; then
+              ERR="${ERR}- ❌ version $VER is not newer than published $EXISTING\n"
+            fi
+            { echo "pkg=$PKG"; echo "ver=$VER"; echo "arch=$ARCH"; } >> "$GITHUB_OUTPUT"
+          fi
+          printf 'errors<<EOM\n%b\nEOM\n' "$ERR" >> "$GITHUB_OUTPUT"
+
+      - name: Collect store metadata from source repo
+        id: meta
+        if: steps.validate.outputs.errors == ''
+        env:
+          SOURCE_REPO: ${{ github.event.client_payload.source_repo }}
+          PKG: ${{ steps.validate.outputs.pkg }}
+        run: |
+          set -uo pipefail
+          ERR=""
+          git clone --depth=1 "$SOURCE_REPO" /tmp/src 2>/dev/null || ERR="- ❌ could not clone source repo\n"
+          if [ -z "$ERR" ]; then
+            python3 - <<'EOF' || ERR="- ❌ $(cat /tmp/meta-error.txt 2>/dev/null || echo metadata collection failed)\n"
+          import json, os, shutil, sys
+          from pathlib import Path
+
+          def fail(msg):
+              Path("/tmp/meta-error.txt").write_text(msg)
+              sys.exit(1)
+
+          pkg = os.environ["PKG"]
+          for mf in Path("/tmp/src").rglob("app-builder.json"):
+              try:
+                  raw = json.loads(mf.read_text())
+              except Exception:
+                  continue
+              if raw.get("package_name") != pkg or "store" not in raw:
+                  continue
+              store, app_dir = raw["store"], mf.parent
+              dest = Path(f"pool/main/{pkg}")
+              dest.mkdir(parents=True, exist_ok=True)
+              meta = {"title": raw.get("app_name", ""),
+                      "summary": store.get("summary", ""),
+                      "categories": store.get("categories", []),
+                      "screenshots": store.get("screenshots", [])}
+              for k in ("description", "locales", "license", "source_repo", "icon", "permissions"):
+                  if store.get(k):
+                      meta[k] = store[k]
+              if not meta["screenshots"]:
+                  fail("app-builder.json store section has no screenshots (at least one 320x170 screenshot required)")
+              shots = dest / "screenshots"
+              shots.mkdir(exist_ok=True)
+              for s in meta["screenshots"]:
+                  src = app_dir / s
+                  if not src.is_file():
+                      fail(f"screenshot not found in source repo: {s}")
+                  shutil.copy2(src, shots / src.name)
+              if store.get("icon") and (app_dir / store["icon"]).is_file():
+                  shutil.copy2(app_dir / store["icon"], dest / Path(store["icon"]).name)
+              (dest / "meta.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False))
+              sys.exit(0)
+          fail(f"no app-builder.json with package_name={pkg} and a store section found in the source repo")
+          EOF
+          fi
+          printf 'errors<<EOM\n%b\nEOM\n' "$ERR" >> "$GITHUB_OUTPUT"
+
+      - name: Create publish PR
+        id: pr
+        if: steps.validate.outputs.errors == '' && steps.meta.outputs.errors == ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DEB_URL: ${{ github.event.client_payload.url }}
+          WANT_SHA: ${{ github.event.client_payload.sha256 }}
+          SIZE: ${{ github.event.client_payload.size }}
+          SUBMITTER: ${{ github.event.client_payload.login }}
+          PKG: ${{ steps.validate.outputs.pkg }}
+          VER: ${{ steps.validate.outputs.ver }}
+          ARCH: ${{ steps.validate.outputs.arch }}
+        run: |
+          set -euo pipefail
+          NAME="${PKG}_${VER}_${ARCH}.deb"
+          ASSET_NAME="${NAME//\~/.}"
+          jq -n --arg f "$ASSET_NAME" --arg u "$DEB_URL" --arg s "$WANT_SHA" \
+                --arg p "$PKG" --arg v "$VER" --arg a "$ARCH" --argjson z "$SIZE" \
+                '{filename:$f,url:$u,sha256:$s,size:$z,package:$p,version:$v,architecture:$a}' \
+                > "pool/main/$PKG/$ASSET_NAME.release.json"
+          BRANCH="publish/${PKG}-${VER}-web-${{ github.run_id }}"
+          git config user.name "cardputerzero-bot"
+          git config user.email "cardputerzero-bot@users.noreply.github.com"
+          git checkout -b "$BRANCH"
+          git add "pool/main/$PKG"
+          git commit -m "publish: $PKG $VER ($ARCH) via web submission by @$SUBMITTER"
+          git push origin "$BRANCH"
+          gh pr create --base main --head "$BRANCH" \
+            --title "publish: $PKG $VER (web submission by @$SUBMITTER)" \
+            --body "$(printf 'Submitted by @%s via cardputer.cc.\n\n| Field | Value |\n|---|---|\n| Version | %s |\n| Architecture | %s |\n| SHA-256 | `%s` |\n| Binary | [%s](%s) |\n\nValidated by [this run](%s/%s/actions/runs/%s). On merge, update-index promotes the binary into the apt-pool release.' \
+              "$SUBMITTER" "$VER" "$ARCH" "$WANT_SHA" "$ASSET_NAME" "$DEB_URL" "${{ github.server_url }}" "${{ github.repository }}" "${{ github.run_id }}")" \
+            > /tmp/pr-url.txt
+          echo "url=$(tail -1 /tmp/pr-url.txt)" >> "$GITHUB_OUTPUT"
+
+      - name: Report failure to the submitter
+        if: always() && (steps.validate.outputs.errors != '' || steps.meta.outputs.errors != '' || failure())
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SUBMITTER: ${{ github.event.client_payload.login }}
+          FILENAME: ${{ github.event.client_payload.filename }}
+          ERR1: ${{ steps.validate.outputs.errors }}
+          ERR2: ${{ steps.meta.outputs.errors }}
+        run: |
+          {
+            echo "@$SUBMITTER your web submission of \`$FILENAME\` failed validation:"
+            echo
+            printf '%b%b' "$ERR1" "$ERR2"
+            echo
+            echo "Details: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo
+            echo "Fix the package and upload again at https://cardputer.cc/submit.html"
+          } > /tmp/issue.md
+          gh issue create \
+            --title "web submission failed: $FILENAME" \
+            --label "web-submission-failed" \
+            --body-file /tmp/issue.md
