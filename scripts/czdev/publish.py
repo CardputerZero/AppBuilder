@@ -165,8 +165,24 @@ def run(deb: Optional[str] = None):
             if icon_src.exists():
                 shutil.copy2(icon_src, dest_dir / icon_src.name)
 
-        # meta.json + release manifest (the binary stays in the buffer release)
-        (dest_dir / "meta.json").write_text(json.dumps(store_meta, indent=2, ensure_ascii=False))
+        # meta.json + release manifest (the binary stays in the buffer release).
+        # Asset paths are rewritten to the pool layout the files were just
+        # copied into (icon at <pkg-dir>/<basename>, screenshots under
+        # <pkg-dir>/screenshots/<basename>) — the app-builder.json values are
+        # source-repo relative and would 404 when the store resolves them
+        # against pool/main/<pkg>/.
+        meta_out = dict(store_meta)
+        if meta_out.get("icon"):
+            meta_out["icon"] = Path(meta_out["icon"]).name
+        if meta_out.get("screenshots"):
+            meta_out["screenshots"] = [f"screenshots/{Path(s).name}" for s in meta_out["screenshots"]]
+        if not isinstance(meta_out.get("author"), dict) or not meta_out.get("author"):
+            display_name = meta["maintainer"].split("<")[0].strip()
+            meta_out["author"] = {
+                "github": user.login,
+                "display_name": display_name or user.login,
+            }
+        (dest_dir / "meta.json").write_text(json.dumps(meta_out, indent=2, ensure_ascii=False))
         (dest_dir / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
 
         print("  → Creating commit... ", end="", flush=True)
@@ -267,6 +283,8 @@ def load_store_meta(deb_path: str) -> tuple:
                 meta["icon"] = store["icon"]
             if store.get("permissions"):
                 meta["permissions"] = store["permissions"]
+            if isinstance(store.get("author"), dict):
+                meta["author"] = store["author"]
 
             if not meta["screenshots"]:
                 print("No screenshots defined in app-builder.json store.screenshots.", file=sys.stderr)
