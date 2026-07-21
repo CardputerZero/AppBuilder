@@ -38,9 +38,7 @@ def run(deb: Optional[str] = None):
     user = gh.get_user()
 
     noreply = f"{user.login}@users.noreply.github.com"
-    all_emails = [noreply]
-    if user.email:
-        all_emails.append(user.email)
+    uploader_email = user.email or noreply
 
     print("Preflight checks:")
 
@@ -50,14 +48,13 @@ def run(deb: Optional[str] = None):
         sys.exit(1)
     print("  ✓ .desktop file found")
 
-    # 2. Extract metadata and check email
+    # 2. Extract metadata. Ownership is first-come-first-served by package name,
+    #    keyed on the uploader's GitHub login (recorded in the release manifest
+    #    below and enforced server-side). We no longer require the deb's
+    #    Maintainer email to match the uploader's GitHub emails — we just record
+    #    who uploaded it.
     meta = extract_metadata(deb_path)
-    if not any(e.lower() == meta["maintainer_email"].lower() for e in all_emails):
-        print(f"ERROR: Maintainer email does not match your GitHub verified emails.", file=sys.stderr)
-        print(f"  Maintainer: {meta['maintainer_email']}", file=sys.stderr)
-        print(f"  Your emails: {all_emails}", file=sys.stderr)
-        sys.exit(1)
-    print("  ✓ Maintainer email matches GitHub account")
+    print(f"  ✓ Maintainer: {meta['maintainer'] or meta['maintainer_email'] or '(none)'}")
 
     # 3. Package name validation
     if not is_valid_package_name(meta["package"]):
@@ -79,7 +76,7 @@ def run(deb: Optional[str] = None):
     check_version_newer(meta)
 
     # Determine target: direct push or fork
-    perm = gh.check_permission(TARGET_OWNER, TARGET_REPO, user.login)
+    perm = gh.check_permission(TARGET_OWNER, TARGET_REPO)
     if perm >= Permission.WRITE:
         push_owner = TARGET_OWNER
         push_repo = TARGET_REPO
@@ -126,6 +123,10 @@ def run(deb: Optional[str] = None):
         "package": meta["package"],
         "version": meta["version"],
         "architecture": meta["architecture"],
+        # Ownership record: first uploader of a package name owns it. The login
+        # is the authoritative owner key; the email is kept for contact/audit.
+        "uploaded_by": user.login,
+        "uploader_email": uploader_email,
     }
 
     # 2) Commit only metadata (meta.json, screenshots, icon, manifest) to a PR
