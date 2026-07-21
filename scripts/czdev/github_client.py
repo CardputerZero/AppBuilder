@@ -59,19 +59,27 @@ class GitHubClient:
         data = self._get("/user")
         return User(login=data["login"], email=data.get("email"))
 
-    def check_permission(self, owner: str, repo: str, username: str) -> int:
+    def check_permission(self, owner: str, repo: str) -> int:
+        """Return the authenticated user's permission level on a repo.
+
+        Uses `GET /repos/{owner}/{repo}`, whose `permissions` object reflects the
+        token owner's access. Unlike the collaborators/{user}/permission endpoint,
+        this does NOT require the caller to already have push access, so external
+        contributors (who should fall through to the fork+PR path) get a clean
+        answer instead of a 403 Forbidden.
+        """
         try:
-            data = self._get(f"/repos/{owner}/{repo}/collaborators/{username}/permission")
+            data = self._get(f"/repos/{owner}/{repo}")
         except urllib.error.HTTPError as e:
-            if e.code == 404:
+            if e.code in (403, 404):
                 return Permission.NONE
             raise
-        perm = data.get("permission", "")
-        if perm == "admin":
+        perms = data.get("permissions", {})
+        if perms.get("admin"):
             return Permission.ADMIN
-        if perm in ("maintain", "write"):
+        if perms.get("maintain") or perms.get("push"):
             return Permission.WRITE
-        if perm in ("read", "triage"):
+        if perms.get("pull") or perms.get("triage"):
             return Permission.READ
         return Permission.NONE
 
