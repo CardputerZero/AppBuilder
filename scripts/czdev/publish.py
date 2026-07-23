@@ -48,6 +48,18 @@ def run(deb: Optional[str] = None):
         sys.exit(1)
     print("  ✓ .desktop file found")
 
+    # 1b. Apps must not run as root. Reject any bundled systemd *system* service
+    #     that would run as root (no User=, User=root/0, and no DynamicUser=yes).
+    root_services = find_root_services(deb_path)
+    if root_services:
+        print("ERROR: apps must not run as root, but these systemd services run as root:", file=sys.stderr)
+        for s in root_services:
+            print(f"         - {s}", file=sys.stderr)
+        print("       Add `User=<non-root>` (e.g. `User=pi`) to the [Service] section, or", file=sys.stderr)
+        print("       rebuild with `pack_deb.py --service-user pi` / `--no-service`.", file=sys.stderr)
+        sys.exit(1)
+    print("  ✓ no root systemd services")
+
     # 2. Extract metadata. Ownership is first-come-first-served by package name,
     #    keyed on the uploader's GitHub login (recorded in the release manifest
     #    below and enforced server-side). We no longer require the deb's
@@ -297,6 +309,69 @@ def load_store_meta(deb_path: str) -> tuple:
     print("app-builder.json not found in current directory.", file=sys.stderr)
     print("  Run `czdev publish` from your app's project directory.", file=sys.stderr)
     sys.exit(1)
+
+
+# Directories where a *system* systemd unit runs as root by default (user
+# units under .../systemd/user/ run as the logged-in user and are not a concern).
+_SYSTEMD_SYSTEM_DIRS = ("lib/systemd/system/", "usr/lib/systemd/system/", "etc/systemd/system/")
+
+
+def service_runs_as_root(text: str) -> bool:
+    """Return True if a systemd .service unit would run as root.
+
+    A unit runs as root unless its [Service] section pins it to a non-root
+    identity via `User=<non-root>` or `DynamicUser=yes`. An empty/`root`/`0`
+    User= (or none) means root.
+    """
+    in_service = False
+    user = None
+    dynamic = False
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("#", ";")):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            in_service = line.lower() == "[service]"
+            continue
+        if not in_service or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip().lower()
+        val = val.strip()
+        if key == "user":
+            user = val
+        elif key == "dynamicuser":
+            dynamic = val.lower() in ("1", "yes", "true", "on")
+    if dynamic:
+        return False
+    if not user:
+        return True
+    return user in ("root", "0")
+
+
+def find_root_services(deb_path: str) -> list:
+    """List bundled systemd system service units that would run as root."""
+    try:
+        tar_bytes = subprocess.run(["dpkg-deb", "--fsys-tarfile", deb_path],
+                                   capture_output=True, check=True).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    import io
+    import tarfile
+    offenders = []
+    with tarfile.open(fileobj=io.BytesIO(tar_bytes)) as tf:
+        for m in tf.getmembers():
+            if not m.isfile():
+                continue
+            name = m.name.lstrip("./")
+            if not (name.endswith(".service") and name.startswith(_SYSTEMD_SYSTEM_DIRS)):
+                continue
+            f = tf.extractfile(m)
+            if f is None:
+                continue
+            if service_runs_as_root(f.read().decode("utf-8", "replace")):
+                offenders.append(name)
+    return offenders
 
 
 def check_desktop(deb_path: str) -> bool:

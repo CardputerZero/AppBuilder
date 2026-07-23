@@ -22,7 +22,7 @@ SERVICE_PATH   = 'lib/systemd/system'
 
 
 def build_deb(package_name, version, bin_name, app_name, src_folder, output_dir,
-              revision='m5stack1', with_service=True):
+              revision='m5stack1', with_service=True, service_user='pi'):
     staging = os.path.join(output_dir, f'debian-{package_name}')
     deb_file = os.path.join(output_dir,
                             f'{package_name}_{version}-{revision}_arm64.deb')
@@ -108,6 +108,12 @@ def build_deb(package_name, version, bin_name, app_name, src_folder, output_dir,
             f.write('[Unit]\n')
             f.write(f'Description={app_name} Service\n\n')
             f.write('[Service]\n')
+            # AppStore policy: apps must NOT run as root. Pin the service to an
+            # unprivileged user (defaults to the launcher's run user). Packages
+            # whose services run as root are rejected by czdev and CI.
+            if service_user and service_user not in ('root', '0'):
+                f.write(f'User={service_user}\n')
+                f.write(f'Group={service_user}\n')
             f.write(f'ExecStart=/{BIN_PATH}/{bin_name}\n')
             f.write(f'WorkingDirectory=/{INSTALL_PREFIX}\n')
             f.write('Restart=always\n')
@@ -139,6 +145,9 @@ def main():
     parser.add_argument('--output-dir', default='.', help='Output directory for .deb')
     parser.add_argument('--revision', default='m5stack1', help='Package revision')
     parser.add_argument('--no-service', action='store_true', help='Skip systemd service generation')
+    parser.add_argument('--service-user', default='pi',
+                        help='Non-root user the systemd service runs as (default: pi). '
+                             'Apps must not run as root; root services are rejected by czdev/CI.')
     args = parser.parse_args()
 
     if not args.app_name:
@@ -153,6 +162,7 @@ def main():
         output_dir=args.output_dir,
         revision=args.revision,
         with_service=not args.no_service,
+        service_user=args.service_user,
     )
 
 
