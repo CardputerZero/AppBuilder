@@ -1,177 +1,66 @@
 # CardputerZero AppBuilder
 
-Online build system & desktop development toolkit for [M5CardputerZero](https://docs.m5stack.com/) applications. Submit any public Git repository and get a ready-to-install `.deb` package — no local toolchain required. Or develop locally with the built-in emulator.
+Build system & developer toolkit for [M5CardputerZero](https://docs.m5stack.com/)
+applications. Submit any public Git repository and get a ready-to-install
+`.deb` package — no local toolchain required — then publish it to the
+CardputerZero AppStore with the Python `czdev` CLI.
 
-## Desktop Emulator
+- **`czdev`** — a small, pure-**Python 3** CLI to authenticate with GitHub and
+  publish / unpublish `.deb` packages. No Rust / cargo toolchain needed.
+- **CI online build** — a GitHub Actions workflow that cross-compiles any repo
+  to an aarch64 `.deb`.
+- **Examples** — a gallery of ready-to-build apps (C/LVGL, SDL2, Qt, Python,
+  Rust) under [`examples/`](examples/).
 
-The `czdev` CLI includes a desktop emulator that renders the CardputerZero 320x170 LCD inside a keyboard skin. Develop and test apps without a physical device.
-
-### NC2000 (文曲星 PDA Emulator)
-
-```bash
-cargo run -p czdev --release -- run apps/nc2000
-```
-
-![NC2000 Emulator](docs/nc2000_emu.png)
-
-### APPLauncher (Home Screen)
-
-```bash
-cargo run -p czdev --release -- run apps/applaunch/
-```
-
-![APPLauncher Emulator](docs/emu-applauncher.png)
-
-### Hello CardputerZero (Example App)
-
-```bash
-cargo run -p czdev --release -- run examples/key_echo
-```
-
-![Hello Example](docs/emu-hello.png)
-
-## Quickstart — Desktop Dev
+## Quickstart
 
 [中文](docs/QUICKSTART_ZH.md) | [日本語](docs/QUICKSTART_JA.md)
 
-Get a 320x170 LVGL app running on your Mac or Linux machine in ~3 minutes — no CardputerZero device required.
-
-### 1. Prerequisites
-
-**macOS:**
 ```bash
-brew install cmake pkg-config sdl2 sdl2_image sdl2_mixer freetype
-```
-
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt install -y build-essential cmake pkg-config \
-    libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libfreetype-dev
-```
-
-**Windows:** MSYS2 MINGW64 shell. See [DESKTOP_DEV.md §4](docs/DESKTOP_DEV.md#4-windows-lvgl--emulator--known-issues-and-plan) for Windows-specific notes.
-
-You also need a recent Rust toolchain (for the emulator commands in `czdev`):
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-> **Note:** Publishing commands (`./czdev login/publish/unpublish/bump`) only require Python 3 — no Rust needed.
-
-### 2. Clone with submodules
-
-```bash
-git clone --recursive git@github.com:m5stack/CardputerZero-AppBuilder.git
+git clone https://github.com/CardputerZero/CardputerZero-AppBuilder.git
 cd CardputerZero-AppBuilder
+
+./czdev --help                 # works immediately with Python 3
+./czdev login                  # one-time GitHub device-flow login
+
+# From your app's project directory (must contain app-builder.json with a
+# "store" section), after producing a .deb:
+./czdev bump    --deb build/my_app_1.0.0_arm64.deb   # show next version
+./czdev publish --deb build/my_app_1.0.1_arm64.deb   # open a publish PR
 ```
 
-If you already cloned without `--recursive`:
-```bash
-git submodule update --init --recursive
-```
+Requirements: **Python 3**, **git**, **dpkg-deb**.
 
-### 3. Verify the environment
+## The `czdev` CLI
 
-```bash
-cargo run -p czdev --release -- doctor
-```
-
-All required rows should be green. If anything is MISSING, the output shows the exact install command for your OS.
-
-### 4. Run the hello app
-
-```bash
-cargo run -p czdev --release -- run examples/hello_cz
-```
-
-On first run this will:
-1. Build the emulator (once, cached in `emulator/build/`).
-2. Build the app into `.czdev/build/`.
-3. Stage the resulting shared library into the emulator's `apps/` directory.
-4. Launch the emulator with the app loaded via `dlopen`.
-
-### 5. Edit-run loop
+`czdev` is the repo-root wrapper (`./czdev`) around the Python package in
+[`scripts/czdev/`](scripts/czdev/). You can also run it as a module:
 
 ```bash
-cargo run -p czdev --release -- watch examples/hello_cz
+PYTHONPATH=scripts python3 -m czdev --help
 ```
 
-The watcher polls `src/`, `include/`, `assets/`, `CMakeLists.txt` and `app-builder.json`. Any change triggers a rebuild and relaunches the emulator.
+| Command | What it does |
+|---|---|
+| `czdev login` | GitHub OAuth **device flow**; stores a token at `~/.czdev/credentials`. |
+| `czdev logout` | Remove the stored GitHub credentials. |
+| `czdev bump [--deb PATH]` | Print the next patch version for a package (reads the version from the `.deb`). Defaults to `./build/*.deb`. |
+| `czdev publish [--deb PATH]` | Validate the `.deb` and open a publish PR against the `packages` repo. Defaults to `./build/*.deb`. |
+| `czdev unpublish NAME --version V [--arch arm64]` | Open a PR that removes a published package version. |
 
-### 6. Writing your own app
+### Ownership model
 
-Copy `examples/hello_cz/` and edit `src/hello_cz.c`. The ABI:
+Package names are **first-come, first-served** by GitHub login: whoever first
+publishes a package name owns it. Afterwards only that uploader (or a repo
+admin) can publish new versions or unpublish it. The uploader's login is
+recorded in the release manifest and enforced server-side — there is no
+email-address matching.
 
-```c
-#include <cz_app.h>
-
-void app_main(lv_obj_t *parent) {
-    lv_obj_t *label = lv_label_create(parent);
-    lv_label_set_text(label, "your UI here");
-    lv_obj_center(label);
-}
-
-void app_event(int type, void *data) {
-    (void)type; (void)data;
-}
-```
-
-The `CMakeLists.txt`:
-
-```cmake
-cmake_minimum_required(VERSION 3.16)
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/../../sdk/cmake")
-include(CZApp)
-cz_add_lvgl_app(my_app SOURCES src/my_app.c)
-```
-
-And the manifest (`app-builder.json`, see [docs/APP_BUILDER_JSON.md](docs/APP_BUILDER_JSON.md)):
-
-```json
-{
-  "package_name": "my_app",
-  "bin_name": "my_app",
-  "app_name": "My App",
-  "runtime": "lvgl-dlopen",
-  "lvgl_version": "9.5"
-}
-```
-
-### 7. Shipping to a real device
-
-Build the aarch64 `.deb` via CI (trigger the `build-deb.yml` workflow), then deploy:
-
-```bash
-cargo run -p czdev --release -- deploy \
-    --host pi@192.168.50.150 \
-    --deb path/to/my_app_arm64.deb
-```
-
-### 8. Publishing to the AppStore
-
-Publishing uses the Python-based `czdev` wrapper (no Rust toolchain needed):
-
-```bash
-# Login to GitHub (one-time)
-./czdev login
-
-# Check next version
-./czdev bump --deb build/my_app_1.0.0_arm64.deb
-
-# Publish (version in deb must be newer than existing)
-./czdev publish --deb build/my_app_1.0.1_arm64.deb
-
-# Remove your own package
-./czdev unpublish my_app --version 1.0.1
-```
-
-Requirements: Python 3, `git`, `git-lfs`, `dpkg-deb`.
-
-#### Publish Workflow
+### `czdev publish` — end-to-end flow
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│                    czdev publish — End-to-End Flow                            │
+│                    czdev publish — End-to-End Flow                             │
 └──────────────────────────────────────────────────────────────────────────────┘
 
  ┌─────────┐         ┌─────────┐         ┌──────────┐         ┌─────────────┐
@@ -179,23 +68,24 @@ Requirements: Python 3, `git`, `git-lfs`, `dpkg-deb`.
  └─────────┘         └─────────┘         └──────────┘         └─────────────┘
       │                    │                    │                      │
       ▼                    ▼                    ▼                      ▼
- czdev login          czdev build         czdev publish           Admin merges
- (GitHub OAuth        or CI workflow       --deb xxx.deb           the PR
-  Device Flow)        ─▶ .deb artifact    ┌────────────┐          │
+ czdev login          CI workflow          czdev publish           Admin merges
+ (GitHub OAuth        ─▶ .deb artifact     --deb xxx.deb           the PR
+  Device Flow)                            ┌────────────┐          │
       │                                   │ Preflight: │          ▼
       ▼                                   │ • .desktop │    ┌───────────┐
- Token saved                              │ • email ✓  │    │  RELEASE  │
- ~/.config/                               │ • version ✓│    └───────────┘
- czdev/token                              │ • size ✓   │          │
-                                          └─────┬──────┘          ▼
-                                                │           APT repo updated
-                                                ▼           App live in Store
-                                          Fork + Push
-                                          ─▶ PR created
+ Token saved                              │ • version ✓│    │  RELEASE  │
+ ~/.czdev/                                │ • size ✓   │    └───────────┘
+ credentials                              │ • no root  │          │
+      │                                   └─────┬──────┘          ▼
+      ▼                                         │           APT repo updated
+ Verified emails                                ▼           App live in Store
+ (user:email)                             Upload .deb to
+                                          GitHub Release
+                                          ─▶ metadata PR
                                              on packages
+```
 
-─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─ ─
-
+```
  Timeline:
 
  You (Developer)                  czdev                     GitHub (Remote)
@@ -205,54 +95,50 @@ Requirements: Python 3, `git`, `git-lfs`, `dpkg-deb`.
       │                             │◀── access token ───────────│
       │                             │                             │
       │── czdev publish ───────────▶│                             │
-      │                             │── validate .deb ──────────▶│ (check ver)
-      │                             │── fork packages repo ─────▶│
-      │                             │── git push (LFS) ─────────▶│
-      │                             │── POST /pulls ────────────▶│
-      │◀── PR URL ─────────────────│                             │
+      │                             │── validate .deb ───────────│ (version/size/root)
+      │                             │── upload .deb to Release ──▶│
+      │                             │── commit metadata + PR ───▶│
+      │◀── PR URL ──────────────────│                             │
       │                             │                             │
       │                             │              Admin reviews & merges
-      │                             │                             │
-      │                             │              CI rebuilds APT index
+      │                             │              CI rebuilds the APT index
       │                             │                             │
       │◀───────────────────── App available in AppStore ─────────│
       │                                                           │
 ```
 
-## Install czdev
+The `.deb` binary is uploaded to a GitHub Release; only small metadata
+(`meta.json`, screenshots, icon, release manifest) is committed in the publish
+PR. See [`docs/APP_BUILDER_JSON.md`](docs/APP_BUILDER_JSON.md) for the
+`store` section that supplies the AppStore listing (title, summary,
+screenshots, categories, …).
 
-`czdev` is split into two parts:
+## Getting a `.deb`
 
-**Publishing commands** (`login`, `logout`, `bump`, `publish`, `unpublish`) — pure Python, no compilation needed:
+You don't need a local ARM toolchain — building happens in CI.
 
-```bash
-git clone --recursive git@github.com:m5stack/CardputerZero-AppBuilder.git
-cd CardputerZero-AppBuilder
-./czdev --help    # works immediately with Python 3
-```
+### Option A — online build from any repo URL
 
-**Emulator commands** (`doctor`, `list`, `build`, `run`, `watch`, `deploy`) — require Rust toolchain:
-
-```bash
-cargo build --release -p czdev
-# Binary at: target/release/czdev
-cargo run -p czdev --release -- run examples/hello_cz
-```
-
-## CI Online Build
-
-1. Go to **Actions** > **Build DEB Package** > **Run workflow**
+1. Go to **Actions** → **Build DEB Package** → **Run workflow**.
 2. Fill in the form:
 
    | Field | Required | Example | Description |
    |-------|----------|---------|-------------|
-   | **Repository URL** | Yes | `https://github.com/eggfly/M5CardputerZero-UserDemo.git` | Any public HTTP Git URL (GitHub, GitCode, Gitee, etc.) |
+   | **Repository URL** | Yes | `https://github.com/CardputerZero/M5CardputerZero-Launcher.git` | Any public HTTP Git URL (GitHub, GitCode, Gitee, …) |
    | **Branch** | No | `master` | Leave empty to use the repository's default branch |
 
-3. The system automatically scans for `app-builder.json` files in the repo, builds each project, and packages them as `.deb`
-4. Download the `.deb` from the workflow run's **Artifacts** section
+3. The workflow scans for `app-builder.json` files, builds each project, and
+   packages them as `.deb`.
+4. Download the `.deb` from the run's **Artifacts** section.
 
-### Install on Device
+### Option B — build the bundled examples
+
+Pushing to this repo runs **Build APPLaunch .deb packages**
+(`.github/workflows/build-debs.yml`), which builds every app under
+[`examples/`](examples/) and attaches the `.deb`s as artifacts. Prebuilt
+examples are also kept under [`dist/`](dist/).
+
+### Install on device
 
 ```bash
 scp <package>_arm64.deb pi@<device-ip>:/tmp/
@@ -261,19 +147,21 @@ ssh pi@<device-ip> "sudo dpkg -i /tmp/<package>_arm64.deb"
 
 ## Architecture
 
-The CI pipeline runs on x86_64 and **cross-compiles** to ARM64 (aarch64) using the `aarch64-linux-gnu-` toolchain — the same approach used by the [M5Stack_Linux_Libs](https://github.com/m5stack/M5Stack_Linux_Libs) SDK.
+The CI pipeline runs on x86_64 and **cross-compiles** to ARM64 (aarch64) using
+the `aarch64-linux-gnu-` toolchain — the same approach used by the
+[M5Stack_Linux_Libs](https://github.com/m5stack/M5Stack_Linux_Libs) SDK.
 
 ```
 User Input (repo URL)
         │
         ▼
   ┌──────────────┐     ┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-  │  git clone   │────▶│   discover   │────▶│ scons build  │────▶│  dpkg-deb    │
+  │  git clone   │────▶│   discover   │────▶│  build       │────▶│  dpkg-deb    │
   │  --recursive │     │ app-builder  │     │ (x86→arm64)  │     │  packaging   │
   └──────────────┘     │    .json     │     └──────────────┘     └──────────────┘
                        └──────────────┘              │
-                              │                      ▼
-                        N projects          N × .deb artifacts
+                              │                       ▼
+                        N projects           N × .deb artifacts
                         (parallel)            (download)
 ```
 
@@ -288,7 +176,7 @@ Generated packages follow the [APPLaunch packaging conventions](https://github.c
 │   ├── postinst      (enable & start systemd service)
 │   └── prerm         (stop & disable service)
 ├── lib/systemd/system/
-│   └── <package>.service
+│   └── <package>.service     (runs as a non-root user; root services are rejected)
 └── usr/share/APPLaunch/
     ├── applications/<package>.desktop
     ├── bin/<executable>
@@ -300,10 +188,16 @@ Generated packages follow the [APPLaunch packaging conventions](https://github.c
 
 ## Troubleshooting
 
-- **`emulator submodule not checked out`** — you forgot `--recursive`. Fix: `git submodule update --init --recursive`.
-- **LVGL link errors about unresolved symbols** — expected in the app library; resolved at `dlopen` time by the emulator.
-- **`indev_read_cb is not registered` warnings** — benign; the emulator falls back to a default keypad indev.
-- **macOS: `Library not loaded: @rpath/SDL2.framework/...`** — re-run `czdev doctor` and install what it reports.
+- **`czdev: python3 not found`** — install Python 3 and re-run.
+- **`app-builder.json not found`** — run `czdev publish` from your app's
+  project directory; the file must contain a `store` section with at least one
+  320×170 screenshot.
+- **`not the owner of <package>`** — that package name is already owned by
+  another GitHub account (first-come, first-served). Pick a different name or
+  ask the owner / a repo admin.
+- **Publish rejected: service runs as root** — apps must not run as root. Pin
+  the bundled systemd service to a non-root user (`User=<non-root>` in the
+  `[Service]` section) and rebuild the `.deb`.
 
 ## Related Projects
 

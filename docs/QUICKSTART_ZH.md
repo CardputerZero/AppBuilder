@@ -1,164 +1,102 @@
-# 快速上手 — CardputerZero 桌面开发 (czdev CLI)
+# 快速上手 — 发布应用到 CardputerZero AppStore
 
 [English](QUICKSTART.md) | [日本語](QUICKSTART_JA.md)
 
-无需 CardputerZero 实体设备，在你的 Mac / Linux 上 3 分钟跑起来一个 320×170 LVGL 应用。
+用纯 Python 的 `czdev` CLI，几分钟内把一个 `.deb` 包发布到 AppStore。不需要
+Rust / cargo，也不需要本地 ARM 工具链——编译都在 CI 里完成。
 
-## 1. 安装依赖
+## 1. 前置依赖
 
-**macOS:**
+- **Python 3**
+- **git**
+- **dpkg-deb**（来自 `dpkg` / `dpkg-dev`）
+
 ```bash
-brew install cmake pkg-config sdl2 sdl2_image sdl2_mixer freetype
+# macOS
+brew install dpkg
+# Debian / Ubuntu
+sudo apt install -y python3 git dpkg-dev
 ```
 
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt install -y build-essential cmake pkg-config \
-    libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libfreetype-dev
-```
-
-**Windows:** 需要 MSYS2 MINGW64 环境，参考
-[DESKTOP_DEV.md §4](DESKTOP_DEV.md#4-windows-lvgl--emulator--known-issues-and-plan)。
-目前 macOS / Linux 流程是完整可用的。
-
-还需要 Rust 工具链（用于模拟器相关命令）：
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-> **提示：** 发布命令（`./czdev login/publish/unpublish/bump`）只需要 Python 3，无需 Rust。
-
-## 2. 克隆仓库（含子模块）
+## 2. 克隆并登录
 
 ```bash
-git clone --recursive git@github.com:m5stack/CardputerZero-AppBuilder.git
+git clone https://github.com/CardputerZero/CardputerZero-AppBuilder.git
 cd CardputerZero-AppBuilder
+
+./czdev --help      # 有 Python 3 即可直接运行
+./czdev login       # GitHub 设备码登录；token 存到 ~/.czdev/credentials
 ```
 
-如果你已经克隆但忘了 `--recursive`：
-```bash
-git submodule update --init --recursive
-```
+`czdev login` 会打印一个验证码和一个网址——打开网址、输入验证码并授权即可。
+后续命令会复用这个 token。
 
-## 3. 检查开发环境
+## 3. 拿到 `.deb`
 
-```bash
-cargo run -p czdev --release -- doctor
-```
+你不需要在本地编译 ARM 二进制。两种拿包方式：
 
-所有 required 行应该显示 OK。缺什么就按输出的提示装。
+- **在线构建**——GitHub **Actions → Build DEB Package → Run workflow**，
+  粘贴你的公开仓库 URL，下载生成的 `.deb` 制品。
+- **内置示例**——推送到本仓库会构建 `examples/` 下所有应用；预构建的包在
+  `dist/`。
 
-## 4. 跑 hello 示例
+你的项目里要有 `app-builder.json`（见
+[APP_BUILDER_JSON.md](APP_BUILDER_JSON.md)），CI 才能发现并构建它。
 
-```bash
-cargo run -p czdev --release -- run examples/hello_cz
-```
+## 4. 补上 `store` 段作为商店信息
 
-第一次运行会：
+`czdev publish` 会从 `app-builder.json` 的 `store` 段读取 AppStore 展示信息。
+至少需要一个标题和一张 320×170 的截图：
 
-1. 编译模拟器（仅一次，产物缓存在 `emulator/build/`）
-2. 编译 `examples/hello_cz` 到 `.czdev/build/`
-3. 把生成的 `libhello_cz.dylib`（或 `.so`）复制到模拟器 `apps/` 目录
-4. 启动模拟器，通过 `dlopen` 加载你的 App
-
-你会看到一个 320×170 的 LCD 窗口（带键盘皮肤），显示 `Hello, CardputerZero!`。
-关闭窗口即退出。
-
-## 5. 热重载开发循环
-
-```bash
-cargo run -p czdev --release -- watch examples/hello_cz
-```
-
-`watch` 会监视 `src/`、`include/`、`assets/`、`CMakeLists.txt` 和
-`app-builder.json`。任何文件修改后自动重新编译并重启模拟器。
-
-## 6. 写你自己的 App
-
-复制 `examples/hello_cz/` 然后改 `src/hello_cz.c`。ABI 定义见
-`sdk/include/cz_app.h`：
-
-```c
-#include <cz_app.h>
-
-void app_main(lv_obj_t *parent) {
-    lv_obj_t *label = lv_label_create(parent);
-    lv_label_set_text(label, "你的界面代码");
-    lv_obj_center(label);
-}
-
-void app_event(int type, void *data) {
-    (void)type; (void)data;
-}
-```
-
-`CMakeLists.txt` 只需三行：
-
-```cmake
-cmake_minimum_required(VERSION 3.16)
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/../../sdk/cmake")
-include(CZApp)
-cz_add_lvgl_app(my_app SOURCES src/my_app.c)
-```
-
-`app-builder.json` 清单文件（详见 `docs/APP_BUILDER_JSON.md`）：
-
-```json
+```jsonc
 {
   "package_name": "my_app",
-  "bin_name": "my_app",
-  "app_name": "My App",
-  "runtime": "lvgl-dlopen",
-  "lvgl_version": "9.5"
+  "app_name":     "My App",
+  "bin_name":     "my_app",
+  "version":      "1.0.1",
+
+  "store": {
+    "summary":     "一句话简介",
+    "description": "详情页展示的较长描述。",
+    "categories":  ["Games"],
+    "screenshots": ["screenshots/main.png"],   // 320×170 的 PNG
+    "icon":        "packaging/icon.png"          // 可选
+  }
 }
 ```
 
-## 7. 部署到真机
+## 5. bump 与 publish
 
-arm64 `.deb` 通过 CI 构建——触发仓库里的 `build-deb.yml` workflow。
-然后推送到设备：
+在你应用的项目目录（含 `app-builder.json` 的那个）里运行：
 
 ```bash
-cargo run -p czdev --release -- deploy \
-    --host pi@192.168.50.150 \
-    --deb path/to/my_app_arm64.deb
+# 查看该 .deb 对应的下一个补丁版本号
+./czdev bump    --deb build/my_app_1.0.0_arm64.deb
+
+# 发布（.deb 里的版本必须高于线上已发布的版本）
+./czdev publish --deb build/my_app_1.0.1_arm64.deb
 ```
 
-## czdev 命令速查
+`publish` 会做发布前检查（存在 `.desktop`、版本已提升、体积、以及
+**没有以 root 运行的 systemd 服务**），把 `.deb` 上传到 GitHub Release，并向
+`packages` 仓库发一个只含元数据的 PR。管理员审核合并后，CI 重建 APT 索引，
+你的应用就上线了。
 
-| 命令 | 作用 |
-|------|------|
-| `czdev doctor` | 检查依赖是否就绪（cmake, SDL2, freetype 等） |
-| `czdev list [路径]` | 扫描目录下所有 `app-builder.json` 项目 |
-| `czdev build [路径]` | 编译 App 的共享库（.dylib / .so） |
-| `czdev run [路径]` | 编译 + 启动模拟器加载 App |
-| `czdev watch [路径]` | 监视源码变化，自动重编译 + 重启 |
-| `czdev deploy --host --deb` | 将 .deb 通过 SSH 推送到设备 |
+不带 `--deb` 时，`czdev` 会在 `./build/*.deb` 里查找。
 
-所有命令通过 `cargo run -p czdev --release --` 前缀调用，或者你也可以先
-`cargo install --path crates/czdev` 装到全局 PATH。
+## 6. 下架
 
-## 常见问题
-
-- **`emulator submodule not checked out`** — `git submodule update --init --recursive`
-- **LVGL 未定义符号链接错误** — 正常现象（运行时由模拟器提供），如果 linker 直接
-  报 error 而不是 warning，参考 `DESKTOP_DEV.md`
-- **macOS `Library not loaded: @rpath/SDL2.framework`** — `brew install sdl2`
-  然后重新跑 `czdev doctor`
-
-## 架构简图
-
+```bash
+./czdev unpublish my_app --version 1.0.1
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    cardputer-zero-emu (模拟器)                  │
-│  ┌────────────────┐         ┌────────────────────────────┐   │
-│  │ LVGL 9.5 引擎  │  ◄────  │  SDL2 窗口 (320×170)       │   │
-│  │ + 字体/图标     │         │  + 键盘事件映射             │   │
-│  └───────┬────────┘         └────────────────────────────┘   │
-│          │ dlopen(RTLD_GLOBAL)                                │
-│          ▼                                                    │
-│  ┌────────────────┐                                          │
-│  │ 你的 App .dylib │  ← app_main(parent) / app_event(...)    │
-│  └────────────────┘                                          │
-└──────────────────────────────────────────────────────────────┘
-```
+
+这会发一个移除该版本的 PR。
+
+## 说明
+
+- **归属按 GitHub 账号先到先得。** 谁先发布某个包名，就归属于其账号；之后只有
+  该账号（或仓库管理员）能发布新版本或下架。
+- **应用不允许以 root 运行。** 如果你的 `.deb` 带 systemd 服务，请把它固定到
+  非 root 用户（`[Service]` 段里写 `User=<non-root>`），否则发布会被拒。
+- 你也可以在网页端 **https://dev.cardputer.cc** 发布——拖入 `.deb`、填写商店
+  信息、提交即可。
