@@ -1,147 +1,105 @@
-# Quickstart — desktop dev for CardputerZero apps
+# Quickstart — publish an app to the CardputerZero AppStore
 
 [中文](QUICKSTART_ZH.md) | [日本語](QUICKSTART_JA.md)
 
-Get a 320×170 LVGL app running on your Mac or Linux machine in ~3 minutes —
-no CardputerZero device required.
+Publish a `.deb` package to the AppStore in a few minutes with the pure-Python
+`czdev` CLI. No Rust / cargo toolchain and no local ARM toolchain are needed —
+building happens in CI.
 
 ## 1. Prerequisites
 
-Install the native toolchain.
+- **Python 3**
+- **git**
+- **dpkg-deb** (from `dpkg` / `dpkg-dev`)
 
-**macOS:**
 ```bash
-brew install cmake pkg-config sdl2 sdl2_image sdl2_mixer freetype
+# macOS
+brew install dpkg
+# Debian / Ubuntu
+sudo apt install -y python3 git dpkg-dev
 ```
 
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt install -y build-essential cmake pkg-config \
-    libsdl2-dev libsdl2-image-dev libsdl2-mixer-dev libfreetype-dev
-```
-
-**Windows:** MSYS2 MINGW64 shell. See
-[DESKTOP_DEV.md §4](DESKTOP_DEV.md#4-windows-lvgl--emulator--known-issues-and-plan)
-for the Windows-specific work still in progress — the mac/Linux loop below is
-what's supported end-to-end today.
-
-You also need a recent Rust toolchain (for the emulator commands). If you don't have one:
-```bash
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-```
-
-> **Note:** Publishing commands (`./czdev login/publish/unpublish/bump`) only
-> require Python 3 — no Rust toolchain needed.
-
-## 2. Clone with submodules
+## 2. Clone and log in
 
 ```bash
-git clone --recursive git@github.com:m5stack/CardputerZero-AppBuilder.git
+git clone https://github.com/CardputerZero/CardputerZero-AppBuilder.git
 cd CardputerZero-AppBuilder
+
+./czdev --help      # works immediately with Python 3
+./czdev login       # GitHub device flow; token saved at ~/.czdev/credentials
 ```
 
-If you already cloned without `--recursive`:
-```bash
-git submodule update --init --recursive
-```
+`czdev login` prints a code and a URL — open the URL, enter the code, and
+authorize. The token is reused by later commands.
 
-## 3. Verify the environment
+## 3. Get a `.deb`
 
-```bash
-cargo run -p czdev --release -- doctor
-```
+You don't build ARM binaries locally. Two ways to obtain a package:
 
-You should see all required rows green. If anything is MISSING, the output
-shows the exact install command for your OS.
+- **Online build** — GitHub **Actions → Build DEB Package → Run workflow**,
+  paste your public repo URL, and download the `.deb` artifact.
+- **Bundled examples** — pushing to this repo builds everything under
+  `examples/`; prebuilt ones are in `dist/`.
 
-## 4. Run the hello app
+Your project must contain an `app-builder.json` (see
+[APP_BUILDER_JSON.md](APP_BUILDER_JSON.md)) for CI to discover and build it.
 
-```bash
-cargo run -p czdev --release -- run examples/hello_cz
-```
+## 4. Add a `store` section for the listing
 
-On first run this will:
+`czdev publish` reads the AppStore listing from the `store` section of your
+`app-builder.json`. At minimum you need a title and one 320×170 screenshot:
 
-1. Build the emulator (once, cached in `emulator/build/`).
-2. Build `examples/hello_cz` into `examples/hello_cz/.czdev/build/`.
-3. Stage the resulting `libhello_cz.dylib` (or `.so`) into the emulator's
-   `apps/` directory.
-4. Launch the emulator with the app loaded via `dlopen`.
-
-You should see a 320×170 LCD inside a keyboard skin, showing
-`Hello, CardputerZero!`. Close the emulator window to exit.
-
-## 5. Edit-run loop
-
-```bash
-cargo run -p czdev --release -- watch examples/hello_cz
-```
-
-The watcher polls `src/`, `include/`, `assets/`, `CMakeLists.txt` and
-`app-builder.json`. Any change triggers a rebuild and relaunches the emulator.
-
-## 6. Writing your own app
-
-Copy `examples/hello_cz/` and edit `src/hello_cz.c`. The ABI is documented in
-`sdk/include/cz_app.h`:
-
-```c
-#include <cz_app.h>
-
-void app_main(lv_obj_t *parent) {
-    lv_obj_t *label = lv_label_create(parent);
-    lv_label_set_text(label, "your UI here");
-    lv_obj_center(label);
-}
-
-void app_event(int type, void *data) {
-    (void)type; (void)data;
-}
-```
-
-The `CMakeLists.txt` is three lines:
-
-```cmake
-cmake_minimum_required(VERSION 3.16)
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/../../sdk/cmake")
-include(CZApp)
-cz_add_lvgl_app(my_app SOURCES src/my_app.c)
-```
-
-And the manifest (see `docs/APP_BUILDER_JSON.md`):
-
-```json
+```jsonc
 {
   "package_name": "my_app",
-  "bin_name": "my_app",
-  "app_name": "My App",
-  "runtime": "lvgl-dlopen",
-  "lvgl_version": "9.5"
+  "app_name":     "My App",
+  "bin_name":     "my_app",
+  "version":      "1.0.1",
+
+  "store": {
+    "summary":     "One-line description",
+    "description": "Longer description shown on the detail page.",
+    "categories":  ["Games"],
+    "screenshots": ["screenshots/main.png"],   // 320×170 PNG(s)
+    "icon":        "packaging/icon.png"          // optional
+  }
 }
 ```
 
-## 7. Shipping to a real device
+## 5. Bump and publish
 
-Building the aarch64 `.deb` stays on CI — trigger the existing
-`build-deb.yml` workflow (see the repo README). Then push to the device:
+Run from your app's project directory (the one with `app-builder.json`):
 
 ```bash
-cargo run -p czdev --release -- deploy \
-    --host pi@192.168.50.150 \
-    --deb path/to/my_app_arm64.deb
+# See the next patch version implied by the .deb
+./czdev bump    --deb build/my_app_1.0.0_arm64.deb
+
+# Publish (the .deb version must be newer than what's already published)
+./czdev publish --deb build/my_app_1.0.1_arm64.deb
 ```
 
-## Troubleshooting
+`publish` runs preflight checks (`.desktop` present, version bump, size, and
+**no systemd service running as root**), uploads the `.deb` to a GitHub
+Release, and opens a metadata PR against the `packages` repo. An admin reviews
+and merges it; CI then rebuilds the APT index and your app goes live.
 
-- **`emulator submodule not checked out`** — you forgot `--recursive`. Fix:
-  `git submodule update --init --recursive`.
-- **LVGL link errors about unresolved symbols** — expected in the app
-  library; they're resolved at `dlopen` time by the emulator. If the linker
-  *fails* instead of warns, see `DESKTOP_DEV.md` for the per-platform link
-  flags (`CZApp.cmake` handles these automatically).
-- **`indev_read_cb is not registered` warnings in the log** — benign; the
-  emulator falls back to a default keypad indev when the app doesn't install
-  its own `lv_sdl_keyboard_create`.
-- **macOS: `Library not loaded: @rpath/SDL2.framework/...`** — `brew install
-  sdl2` puts the library in a non-framework path; re-run `czdev doctor` and
-  install what it reports.
+If `--deb` is omitted, `czdev` searches `./build/*.deb`.
+
+## 6. Unpublish
+
+```bash
+./czdev unpublish my_app --version 1.0.1
+```
+
+This opens a PR that removes that version.
+
+## Notes
+
+- **Ownership is first-come, first-served by GitHub login.** Whoever first
+  publishes a package name owns it; only that account (or a repo admin) can
+  publish new versions or unpublish it.
+- **Apps must not run as root.** If your `.deb` ships a systemd service, pin it
+  to a non-root user (`User=<non-root>` in `[Service]`) or publishing is
+  rejected.
+- You can also publish from the web at **https://dev.cardputer.cc** — drag a
+  `.deb`, fill in the store info, and submit.

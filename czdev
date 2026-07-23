@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+#
+# czdev — CardputerZero developer CLI (Python).
+#
+# Thin launcher for the pure-Python package in scripts/czdev. It puts the
+# scripts/ directory on PYTHONPATH and runs the package as a module, so the
+# package's relative imports (`from .auth import login`, …) resolve correctly.
+#
+# Commands: login · logout · bump · publish · unpublish
+# Requirements: Python 3, git, dpkg-deb.  (No Rust / cargo toolchain needed.)
+#
+# Usage:
+#   ./czdev --help
+#   ./czdev login
+#   ./czdev publish --deb build/my_app_1.0.1_arm64.deb
+set -euo pipefail
+
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "czdev: python3 not found on PATH. Install Python 3 and retry." >&2
+  exit 1
+fi
+
+exec env PYTHONPATH="${HERE}/scripts${PYTHONPATH:+:${PYTHONPATH}}" \
+  python3 -m czdev "$@"
