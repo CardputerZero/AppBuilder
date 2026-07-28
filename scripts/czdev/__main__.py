@@ -11,6 +11,21 @@ def main():
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    # new
+    new_parser = subparsers.add_parser(
+        "new", help="Scaffold a new app from the CardputerZero project template.")
+    new_parser.add_argument("name", help="App name (also the Debian package name)")
+    new_parser.add_argument("--dir", default=None, help="Target directory (default: ./<name>)")
+    new_parser.add_argument("--template", default="CardputerZero/Template",
+                            help="Template repo as owner/repo or a git URL "
+                                 "(default: CardputerZero/Template)")
+    new_parser.add_argument("--ref", default="main",
+                            help="Template branch to copy the latest commit of (default: main)")
+    new_parser.add_argument("--display-name", default=None,
+                            help="Launcher display name (default: derived from the app name)")
+    new_parser.add_argument("--no-git", action="store_true",
+                            help="Do not create a git repository in the new project")
+
     # login
     subparsers.add_parser("login", help="Authenticate with GitHub (device flow).")
 
@@ -37,7 +52,11 @@ def main():
         parser.print_help()
         sys.exit(0)
 
-    if args.command == "login":
+    if args.command == "new":
+        from .new import run
+        run(name=args.name, dir=args.dir, template=args.template, ref=args.ref,
+            display_name=args.display_name, no_git=args.no_git)
+    elif args.command == "login":
         from .auth import login
         login()
     elif args.command == "logout":

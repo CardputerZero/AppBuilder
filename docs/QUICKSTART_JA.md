@@ -32,7 +32,28 @@ cd CardputerZero-AppBuilder
 `czdev login` はコードと URL を表示します — URL を開いてコードを入力し、認可
 してください。以降のコマンドはこのトークンを再利用します。
 
-## 3. `.deb` を入手する
+## 3. 新しいプロジェクトを作る（任意）
+
+アプリがまだない場合は、[プロジェクトテンプレート](https://github.com/CardputerZero/Template)
+（LVGL + CMake）から雛形を作成できます:
+
+```bash
+./czdev new my-app                 # → ./my-app、テンプレート main の最新状態をコピー
+# または GitHub 側でコピーを作る:
+gh repo create my-app --template CardputerZero/Template --public --clone
+```
+
+`czdev new` はテンプレートのプレースホルダーを自動で置き換えます: CMake の
+プロジェクト名、バイナリに埋め込まれる `APP_NAME`、ランチャー表示名、そして
+アイコンのファイル名です。アイコンは**共有ディレクトリ**
+`/usr/share/APPLaunch/share/images/` にインストールされるため、どれも
+`template.png` のままだとテンプレート由来のパッケージ同士が dpkg のファイル
+衝突を起こします。
+
+`NAME` は公開時のパッケージ名になるので、有効な Debian パッケージ名
+（小文字で始まる）である必要があります。
+
+## 4. `.deb` を入手する
 
 ARM バイナリをローカルでビルドする必要はありません。入手方法は 2 つ:
 
@@ -45,7 +66,7 @@ ARM バイナリをローカルでビルドする必要はありません。入�
 CI が発見・ビルドできるよう、プロジェクトには `app-builder.json`
 （[APP_BUILDER_JSON.md](APP_BUILDER_JSON.md) 参照）が必要です。
 
-## 4. ストア情報として `store` セクションを追加
+## 5. ストア情報として `store` セクションを追加
 
 `czdev publish` は `app-builder.json` の `store` セクションから AppStore の
 掲載情報を読み取ります。最低限、タイトルと 320×170 のスクリーンショットが
@@ -68,7 +89,7 @@ CI が発見・ビルドできるよう、プロジェクトには `app-builder.
 }
 ```
 
-## 5. bump と publish
+## 6. bump と publish
 
 アプリのプロジェクトディレクトリ（`app-builder.json` がある場所）で実行します:
 
@@ -87,7 +108,7 @@ CI が発見・ビルドできるよう、プロジェクトには `app-builder.
 
 `--deb` を省略すると、`czdev` は `./build/*.deb` を探します。
 
-## 6. 公開停止（unpublish）
+## 7. 公開停止（unpublish）
 
 ```bash
 ./czdev unpublish my_app --version 1.0.1

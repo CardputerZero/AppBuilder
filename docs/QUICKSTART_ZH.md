@@ -31,7 +31,25 @@ cd CardputerZero-AppBuilder
 `czdev login` 会打印一个验证码和一个网址——打开网址、输入验证码并授权即可。
 后续命令会复用这个 token。
 
-## 3. 拿到 `.deb`
+## 3. 新建项目（可选）
+
+如果还没有应用，可以从[项目模板](https://github.com/CardputerZero/Template)
+（LVGL + CMake）脚手架一个：
+
+```bash
+./czdev new my-app                 # → ./my-app，取模板 main 分支的最新状态
+# 或者让 GitHub 直接复制一份：
+gh repo create my-app --template CardputerZero/Template --public --clone
+```
+
+`czdev new` 会顺带把模板里的占位符改成你的应用名：CMake 项目名、编译进二进制的
+`APP_NAME`、启动器显示名，以及图标文件名。图标这一项很关键——模板的图标会装到
+**共享目录** `/usr/share/APPLaunch/share/images/`，若都叫 `template.png`，两个基于
+模板的包装到同一台设备上会产生 dpkg 文件冲突。
+
+`NAME` 必须是合法的 Debian 包名（小写字母开头），因为它就是将来发布用的包名。
+
+## 4. 拿到 `.deb`
 
 你不需要在本地编译 ARM 二进制。两种拿包方式：
 
@@ -43,7 +61,7 @@ cd CardputerZero-AppBuilder
 你的项目里要有 `app-builder.json`（见
 [APP_BUILDER_JSON.md](APP_BUILDER_JSON.md)），CI 才能发现并构建它。
 
-## 4. 补上 `store` 段作为商店信息
+## 5. 补上 `store` 段作为商店信息
 
 `czdev publish` 会从 `app-builder.json` 的 `store` 段读取 AppStore 展示信息。
 至少需要一个标题和一张 320×170 的截图：
@@ -65,7 +83,7 @@ cd CardputerZero-AppBuilder
 }
 ```
 
-## 5. bump 与 publish
+## 6. bump 与 publish
 
 在你应用的项目目录（含 `app-builder.json` 的那个）里运行：
 
@@ -84,7 +102,7 @@ cd CardputerZero-AppBuilder
 
 不带 `--deb` 时，`czdev` 会在 `./build/*.deb` 里查找。
 
-## 6. 下架
+## 7. 下架
 
 ```bash
 ./czdev unpublish my_app --version 1.0.1

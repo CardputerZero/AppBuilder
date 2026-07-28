@@ -5,8 +5,9 @@ applications. Submit any public Git repository and get a ready-to-install
 `.deb` package — no local toolchain required — then publish it to the
 CardputerZero AppStore with the Python `czdev` CLI.
 
-- **`czdev`** — a small, pure-**Python 3** CLI to authenticate with GitHub and
-  publish / unpublish `.deb` packages. No Rust / cargo toolchain needed.
+- **`czdev`** — a small, pure-**Python 3** CLI to scaffold a new app, authenticate
+  with GitHub and publish / unpublish `.deb` packages. No Rust / cargo toolchain
+  needed.
 - **CI online build** — a GitHub Actions workflow that cross-compiles any repo
   to an aarch64 `.deb`.
 - **Examples** — a gallery of ready-to-build apps (C/LVGL, SDL2, Qt, Python,
@@ -22,6 +23,7 @@ cd CardputerZero-AppBuilder
 
 ./czdev --help                 # works immediately with Python 3
 ./czdev login                  # one-time GitHub device-flow login
+./czdev new my-app             # scaffold a project from the latest template
 
 # From your app's project directory (must contain app-builder.json with a
 # "store" section), after producing a .deb:
@@ -42,6 +44,7 @@ PYTHONPATH=scripts python3 -m czdev --help
 
 | Command | What it does |
 |---|---|
+| `czdev new NAME` | Scaffold a new app from the [project template](https://github.com/CardputerZero/Template). See [Starting a new app](#starting-a-new-app). |
 | `czdev login` | GitHub OAuth **device flow**; stores a token at `~/.czdev/credentials`. |
 | `czdev logout` | Remove the stored GitHub credentials. |
 | `czdev bump [--deb PATH]` | Print the next patch version for a package (reads the version from the `.deb`). Defaults to `./build/*.deb`. |
@@ -112,6 +115,46 @@ The `.deb` binary is uploaded to a GitHub Release; only small metadata
 PR. See [`docs/APP_BUILDER_JSON.md`](docs/APP_BUILDER_JSON.md) for the
 `store` section that supplies the AppStore listing (title, summary,
 screenshots, categories, …).
+
+## Starting a new app
+
+New projects start from [**CardputerZero/Template**](https://github.com/CardputerZero/Template)
+(LVGL + CMake, desktop SDL preview + device framebuffer build). Two equivalent
+ways to get a copy — both always give you the template's **latest** state:
+
+```bash
+# A. via czdev (clones the template's default branch, renames placeholders)
+./czdev new my-app
+
+# B. via GitHub's template mechanism (creates a fresh repo under your account)
+gh repo create my-app --template CardputerZero/Template --public --clone
+```
+
+`czdev new` additionally does the per-app renaming that the template needs:
+the CMake project name, the compiled-in `APP_NAME`, the launcher display name,
+and — importantly — the icon files. The template's icons install into the
+**shared** `/usr/share/APPLaunch/share/images/`, so leaving them named
+`template*.png` makes two template-derived packages conflict on install.
+
+```bash
+./czdev new my-app --display-name "My App"   # launcher name (default: "My App" from the slug)
+./czdev new my-app --dir ~/projects/my-app   # target directory (default: ./my-app)
+./czdev new my-app --template me/MyTemplate  # a different template repo, or a git URL
+./czdev new my-app --ref dev                 # a different template branch
+./czdev new my-app --no-git                  # don't create a git repo
+```
+
+`NAME` must be a valid Debian package name (lowercase, starts with a letter),
+because it becomes the package name at publish time.
+
+> **Why not a git submodule?** A submodule stores a **gitlink** — an exact
+> commit SHA — in the parent tree, so AppBuilder would freeze every developer
+> on whichever template commit happened to be vendored, and each template
+> update would need a commit here. `czdev new` copies the branch tip at
+> scaffold time instead, so there is no pinned commit anywhere. The trade-off
+> is that a scaffolded project is *not* linked to upstream: later template
+> changes must be cherry-picked manually (which is the normal expectation for
+> a scaffold — same as `cargo new`).
 
 ## Getting a `.deb`
 

@@ -32,7 +32,24 @@ cd CardputerZero-AppBuilder
 `czdev login` prints a code and a URL — open the URL, enter the code, and
 authorize. The token is reused by later commands.
 
-## 3. Get a `.deb`
+## 3. Start a project (optional)
+
+If you don't have an app yet, scaffold one from the
+[project template](https://github.com/CardputerZero/Template) (LVGL + CMake):
+
+```bash
+./czdev new my-app                 # → ./my-app, copied from the template's latest main
+# or let GitHub make the copy:
+gh repo create my-app --template CardputerZero/Template --public --clone
+```
+
+`czdev new` renames the template's placeholders for you — CMake project name,
+compiled-in `APP_NAME`, launcher display name, and the icon files (these install
+into the *shared* `/usr/share/APPLaunch/share/images/`, so unique names are
+required or two template-derived packages conflict). `NAME` must be a valid
+Debian package name, since it becomes the package name at publish time.
+
+## 4. Get a `.deb`
 
 You don't build ARM binaries locally. Two ways to obtain a package:
 
@@ -44,7 +61,7 @@ You don't build ARM binaries locally. Two ways to obtain a package:
 Your project must contain an `app-builder.json` (see
 [APP_BUILDER_JSON.md](APP_BUILDER_JSON.md)) for CI to discover and build it.
 
-## 4. Add a `store` section for the listing
+## 5. Add a `store` section for the listing
 
 `czdev publish` reads the AppStore listing from the `store` section of your
 `app-builder.json`. At minimum you need a title and one 320×170 screenshot:
@@ -66,7 +83,7 @@ Your project must contain an `app-builder.json` (see
 }
 ```
 
-## 5. Bump and publish
+## 6. Bump and publish
 
 Run from your app's project directory (the one with `app-builder.json`):
 
@@ -85,7 +102,7 @@ and merges it; CI then rebuilds the APT index and your app goes live.
 
 If `--deb` is omitted, `czdev` searches `./build/*.deb`.
 
-## 6. Unpublish
+## 7. Unpublish
 
 ```bash
 ./czdev unpublish my_app --version 1.0.1
