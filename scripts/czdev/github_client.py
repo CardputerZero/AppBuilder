@@ -1,14 +1,82 @@
 """GitHub API client — mirrors the Rust GitHubClient."""
 
+import http.client
+import io
+import json
+import random
+import socket
+import ssl
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
-import json
-import ssl
 from typing import Optional
 
 GITHUB_API = "https://api.github.com"
 GITHUB_UPLOADS = "https://uploads.github.com"
+
+USER_AGENT = "czdev/0.1"
+HTTP_TIMEOUT = 60
+# A release asset can be hundreds of MB on a slow uplink, so it gets its own
+# budget instead of the API timeout.
+UPLOAD_TIMEOUT = 3600
+MAX_ATTEMPTS = 4
+# Statuses where GitHub is telling us this is not its final answer.
+RETRY_STATUSES = (429, 500, 502, 503, 504)
+
+
+class GitHubError(Exception):
+    """A request could not be completed, or the reply was not usable."""
+
+
+class _Transient(Exception):
+    """A network-level failure that is worth retrying."""
+
+
+def _read_body(resp) -> bytes:
+    """Read a response body in full.
+
+    A body that stops short of its Content-Length means the connection was cut
+    mid-response — the signature of a flaky link or an intercepting proxy. That
+    is transient rather than a protocol error, so it is reported as such instead
+    of escaping as an IncompleteRead from inside json.loads.
+    """
+    try:
+        return resp.read()
+    except http.client.IncompleteRead as e:
+        got = len(e.partial)
+        want = f" of {got + e.expected}" if e.expected else ""
+        raise _Transient(f"connection closed after {got}{want} bytes") from e
+    except (socket.timeout, TimeoutError, ConnectionError) as e:
+        raise _Transient(str(e) or e.__class__.__name__) from e
+
+
+def _snippet(raw: bytes, limit: int = 200) -> str:
+    return " ".join(raw.decode("utf-8", "replace").split())[:limit] or "(empty body)"
+
+
+def _parse_json(raw: bytes, status: int, headers, url: str) -> dict:
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as e:
+        ctype = headers.get("content-type") or "an unknown content type"
+        raise GitHubError(f"HTTP {status} from {url} returned {ctype} instead "
+                          f"of JSON. Body: {_snippet(raw)}") from e
+
+
+def _http_error(url: str, status: int, headers, raw: bytes) -> urllib.error.HTTPError:
+    """Build the HTTPError callers switch on, with the body in the message."""
+    return urllib.error.HTTPError(url, status, _snippet(raw), headers, io.BytesIO(raw))
+
+
+def _sleep_before_retry(attempt: int, retry_after: Optional[str] = None) -> None:
+    delay = min(2 ** attempt, 30) * (0.5 + random.random())
+    if retry_after:
+        try:
+            delay = max(delay, min(float(retry_after), 60))
+        except ValueError:
+            pass
+    time.sleep(delay)
 
 
 class Permission:
@@ -35,19 +103,65 @@ class GitHubClient:
         self.token = token
         self._ctx = ssl.create_default_context()
 
+    def _send(self, req, timeout):
+        """One round trip. An error status is an answer, not an exception."""
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout, context=self._ctx)
+            return resp.status, resp.headers, _read_body(resp)
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers, _read_body(e)
+        except urllib.error.URLError as e:
+            raise _Transient(str(e.reason)) from e
+        except (socket.timeout, TimeoutError, ConnectionError) as e:
+            raise _Transient(str(e) or e.__class__.__name__) from e
+
+    def _fetch(self, method: str, url: str, data=None,
+               accept="application/vnd.github+json", content_type=None,
+               timeout=HTTP_TIMEOUT, retry_safe=None, retry_statuses=True):
+        """Run one call with retries, returning (status, headers, body).
+
+        Only GETs are replayed after a network failure: a POST that died
+        mid-response may still have been applied, and re-sending it could create
+        a second commit, ref or pull request. Callers that know how to clean up
+        after themselves pass retry_safe=True.
+        """
+        if retry_safe is None:
+            retry_safe = method in ("GET", "HEAD")
+        for attempt in range(MAX_ATTEMPTS):
+            req = urllib.request.Request(url, data=data, method=method)
+            req.add_header("Authorization", f"Bearer {self.token}")
+            req.add_header("User-Agent", USER_AGENT)
+            req.add_header("Accept", accept)
+            if content_type:
+                req.add_header("Content-Type", content_type)
+            try:
+                status, headers, raw = self._send(req, timeout)
+            except _Transient as e:
+                if not retry_safe:
+                    raise GitHubError(f"{method} {url} failed: {e}") from e
+                if attempt == MAX_ATTEMPTS - 1:
+                    raise GitHubError(
+                        f"{method} {url} failed {MAX_ATTEMPTS} times: {e}. "
+                        f"A proxy or VPN cutting connections to GitHub looks "
+                        f"exactly like this — try another network.") from e
+                _sleep_before_retry(attempt)
+                continue
+            if retry_statuses and status in RETRY_STATUSES and attempt < MAX_ATTEMPTS - 1:
+                _sleep_before_retry(attempt, headers.get("retry-after"))
+                continue
+            return status, headers, raw
+
     def _request(self, method: str, path: str, body=None, accept="application/vnd.github+json") -> dict:
         url = f"{GITHUB_API}{path}" if path.startswith("/") else path
         data = json.dumps(body).encode() if body is not None else None
-        req = urllib.request.Request(url, data=data, method=method)
-        req.add_header("Authorization", f"Bearer {self.token}")
-        req.add_header("User-Agent", "czdev/0.1")
-        req.add_header("Accept", accept)
-        if data is not None:
-            req.add_header("Content-Type", "application/json")
-        resp = urllib.request.urlopen(req, context=self._ctx)
-        if resp.status == 204:
+        status, headers, raw = self._fetch(
+            method, url, data=data, accept=accept,
+            content_type="application/json" if data is not None else None)
+        if status >= 400:
+            raise _http_error(url, status, headers, raw)
+        if status == 204 or not raw.strip():
             return {}
-        return json.loads(resp.read().decode())
+        return _parse_json(raw, status, headers, url)
 
     def _get(self, path: str, accept="application/vnd.github+json"):
         return self._request("GET", path, accept=accept)
@@ -171,31 +285,44 @@ class GitHubClient:
 
         Returns the browser_download_url.
         """
-        existing = self.find_release_asset(release, name)
-        if existing:
-            self.delete_release_asset(owner, repo, existing["id"])
         release_id = release["id"]
         url = f"{GITHUB_UPLOADS}/repos/{owner}/{repo}/releases/{release_id}/assets?name={urllib.parse.quote(name)}"
         with open(file_path, "rb") as f:
             data = f.read()
-        req = urllib.request.Request(url, data=data, method="POST")
-        req.add_header("Authorization", f"Bearer {self.token}")
-        req.add_header("User-Agent", "czdev/0.1")
-        req.add_header("Accept", "application/vnd.github+json")
-        req.add_header("Content-Type", "application/octet-stream")
-        resp = urllib.request.urlopen(req, context=self._ctx)
-        return json.loads(resp.read().decode())["browser_download_url"]
+
+        for attempt in range(MAX_ATTEMPTS):
+            # Re-read the release on every round: a previous attempt may have
+            # left a half-uploaded asset behind, and GitHub rejects a duplicate
+            # name with a 422.
+            current = release if attempt == 0 else self._get(
+                f"/repos/{owner}/{repo}/releases/{release_id}")
+            existing = self.find_release_asset(current, name)
+            if existing:
+                self.delete_release_asset(owner, repo, existing["id"])
+            try:
+                status, headers, raw = self._fetch(
+                    "POST", url, data=data,
+                    content_type="application/octet-stream",
+                    timeout=UPLOAD_TIMEOUT, retry_safe=False, retry_statuses=False)
+            except GitHubError as e:
+                if attempt == MAX_ATTEMPTS - 1:
+                    raise
+                print(f"\n    upload failed ({e}); retrying... ", end="", flush=True)
+                _sleep_before_retry(attempt)
+                continue
+            if status in RETRY_STATUSES and attempt < MAX_ATTEMPTS - 1:
+                _sleep_before_retry(attempt, headers.get("retry-after"))
+                continue
+            if status >= 400:
+                raise _http_error(url, status, headers, raw)
+            return _parse_json(raw, status, headers, url)["browser_download_url"]
 
     def get_file_content(self, owner: str, repo: str, path: str) -> bytes:
         url = f"{GITHUB_API}/repos/{owner}/{repo}/contents/{path}"
-        req = urllib.request.Request(url, method="GET")
-        req.add_header("Authorization", f"Bearer {self.token}")
-        req.add_header("User-Agent", "czdev/0.1")
-        req.add_header("Accept", "application/vnd.github.raw+json")
-        try:
-            resp = urllib.request.urlopen(req, context=self._ctx)
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                raise FileNotFoundError(f"file not found: {path}")
-            raise
-        return resp.read()
+        status, headers, raw = self._fetch(
+            "GET", url, accept="application/vnd.github.raw+json")
+        if status == 404:
+            raise FileNotFoundError(f"file not found: {path}")
+        if status >= 400:
+            raise _http_error(url, status, headers, raw)
+        return raw

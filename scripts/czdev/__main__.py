@@ -3,6 +3,8 @@
 import argparse
 import sys
 
+from .github_client import GitHubError
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -52,6 +54,17 @@ def main():
         parser.print_help()
         sys.exit(0)
 
+    try:
+        dispatch(args, parser)
+    except GitHubError as e:
+        print(f"\nERROR: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        sys.exit(130)
+
+
+def dispatch(args, parser):
     if args.command == "new":
         from .new import run
         run(name=args.name, dir=args.dir, template=args.template, ref=args.ref,
