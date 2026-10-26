@@ -49,6 +49,7 @@ PYTHONPATH=scripts python3 -m czdev --help
 | `czdev logout` | Remove the stored GitHub credentials. |
 | `czdev bump [--deb PATH]` | Print the next patch version for a package (reads the version from the `.deb`). Defaults to `./build/*.deb`. |
 | `czdev publish [--deb PATH]` | Validate the `.deb` and open a publish PR against the `packages` repo. Defaults to `./build/*.deb`. |
+| `czdev publish --meta-only` | Update only the store listing (the `store` section of `app-builder.json`, screenshots, icon) of an already-published package, without a new `.deb` or version. Merges automatically once ownership and the metadata policy pass. |
 | `czdev unpublish NAME --version V [--arch arm64]` | Open a PR that removes a published package version. |
 
 ### Ownership model

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import auth
 from .github_client import GitHubClient, Permission
+from .versions import asset_safe, ref_safe
 
 TARGET_OWNER = "CardputerZero"
 TARGET_REPO = "packages"
@@ -22,8 +23,8 @@ def run(package: str, version: str, arch: str = "arm64"):
     user = gh.get_user()
 
     # Packages are referenced by a manifest in git; the .deb itself lives in a
-    # Release. GitHub sanitizes '~' to '.' in release asset names.
-    asset_name = f"{package}_{version}_{arch}.deb".replace("~", ".")
+    # Release. GitHub sanitizes '~' and ':' to '.' in release asset names.
+    asset_name = asset_safe(f"{package}_{version}_{arch}.deb")
     file_path = f"pool/main/{package}/{asset_name}.release.json"
 
     print(f"Checking ownership of {package} {version}...")
@@ -81,9 +82,11 @@ def run(package: str, version: str, arch: str = "arm64"):
 
     print("Creating removal PR...")
 
-    # Get base
-    base_sha = gh.get_ref_sha(push_owner, push_repo, "heads/main")
-    _, base_tree_sha = gh.get_commit(push_owner, push_repo, base_sha)
+    # Base on the official repo's main, not the fork's: an unsynced fork may not
+    # even contain the manifest yet. A fork shares upstream's objects, so the
+    # tree and commit below can be built on it directly.
+    base_sha = gh.get_ref_sha(TARGET_OWNER, TARGET_REPO, "heads/main")
+    _, base_tree_sha = gh.get_commit(TARGET_OWNER, TARGET_REPO, base_sha)
 
     # Create tree with file removed (sha: None deletes the entry)
     tree_sha = gh.create_tree(push_owner, push_repo, base_tree_sha, file_path, None)
@@ -118,7 +121,7 @@ def run(package: str, version: str, arch: str = "arm64"):
 
 def branch_name(package: str, version: str) -> str:
     ts = int(time.time())
-    return f"unpublish/{package}-{version}-{ts}"
+    return f"unpublish/{package}-{ref_safe(version)}-{ts}"
 
 
 def extract_email(maintainer: str) -> str:
