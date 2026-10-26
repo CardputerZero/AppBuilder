@@ -3,12 +3,12 @@
 import hashlib
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,7 @@ from typing import Optional
 
 from . import auth
 from .github_client import GitHubClient, Permission
+from .versions import asset_safe, compare_versions, ref_safe
 
 TARGET_OWNER = "CardputerZero"
 TARGET_REPO = "packages"
@@ -95,35 +96,19 @@ def run(deb: Optional[str] = None):
     precheck_store_meta(meta_out, app_dir, store_meta, meta["package"],
                         deb_maintainer=meta.get("maintainer", ""))
 
-    # Determine target: direct push or fork
-    perm = gh.check_permission(TARGET_OWNER, TARGET_REPO)
-    if perm >= Permission.WRITE:
-        push_owner = TARGET_OWNER
-        push_repo = TARGET_REPO
-        pr_head = None
-    else:
-        print(f"You don't have write access to {TARGET_OWNER}/{TARGET_REPO}.")
-        print("  → Forking to your account...  ", end="", flush=True)
-        fork_name = gh.fork_repo(TARGET_OWNER, TARGET_REPO)
-        print(f"done ({fork_name})")
-        parts = fork_name.split("/")
-        push_owner = parts[0]
-        push_repo = parts[1]
-        branch = branch_name(meta)
-        pr_head = f"{user.login}:{branch}"
+    push_owner, push_repo, pr_head_owner = push_target(gh, user)
 
-    # Integrity + canonical asset name. GitHub sanitizes '~' to '.' in release
-    # asset names, so the on-release/manifest filename may differ from the
-    # Debian version string (which keeps '~').
+    # Integrity + canonical asset name. GitHub sanitizes '~' and ':' to '.' in
+    # release asset names, so the on-release/manifest filename may differ from
+    # the Debian version string (which keeps them).
     file_bytes = Path(deb_path).read_bytes()
     sha256_hash = hashlib.sha256(file_bytes).hexdigest()
     file_size = len(file_bytes)
     deb_name = f"{meta['package']}_{meta['version']}_{meta['architecture']}.deb"
-    asset_name = deb_name.replace("~", ".")
+    asset_name = asset_safe(deb_name)
     manifest_name = f"{asset_name}.release.json"
     manifest_path_in_repo = f"pool/main/{meta['package']}/{manifest_name}"
     branch = branch_name(meta)
-    remote_url = f"git@github.com:{push_owner}/{push_repo}.git"
 
     # 1) Upload the .deb to a buffer Release on the push target. For third-party
     #    contributors this is their own fork — it uses THEIR free Release storage
@@ -151,61 +136,10 @@ def run(deb: Optional[str] = None):
 
     # 2) Commit only metadata (meta.json, screenshots, icon, manifest) to a PR
     #    branch — no .deb, no LFS.
-    print(f"Uploading metadata to {TARGET_OWNER}/{TARGET_REPO}...")
+    push_pool_branch(gh, push_owner, push_repo, branch, meta["package"], app_dir, store_meta, meta_out,
+                     extra={manifest_name: json.dumps(manifest, indent=2) + "\n"},
+                     message=f"publish: {meta['package']} {meta['version']} ({meta['architecture']})")
 
-    tmp_dir = Path(tempfile.mkdtemp(prefix="czdev-publish-"))
-    try:
-        run_cmd_in(tmp_dir, ["git", "init"])
-        run_cmd_in(tmp_dir, ["git", "remote", "add", "origin", remote_url])
-
-        print("  → git fetch (minimal)... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "fetch", "--depth=1", "--filter=blob:none", "origin", "main"])
-        print("done")
-
-        print(f"  → Creating branch {branch}... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "checkout", "-b", branch, "origin/main"])
-        print("done")
-
-        dest_dir = tmp_dir / "pool" / "main" / meta["package"]
-        dest_dir.mkdir(parents=True, exist_ok=True)
-
-        # Copy screenshots
-        if store_meta.get("screenshots"):
-            screenshots_dest = dest_dir / "screenshots"
-            screenshots_dest.mkdir(parents=True, exist_ok=True)
-            for shot in store_meta["screenshots"]:
-                src = Path(app_dir) / shot
-                if not src.exists():
-                    print(f"ERROR: Screenshot not found: {src}", file=sys.stderr)
-                    sys.exit(1)
-                shutil.copy2(src, screenshots_dest / src.name)
-
-        # Copy icon
-        if store_meta.get("icon"):
-            icon_src = Path(app_dir) / store_meta["icon"]
-            if icon_src.exists():
-                shutil.copy2(icon_src, dest_dir / icon_src.name)
-
-        # meta.json + release manifest (the binary stays in the buffer release).
-        # meta_out was built and pre-checked before the upload.
-        (dest_dir / "meta.json").write_text(json.dumps(meta_out, indent=2, ensure_ascii=False) + "\n")
-        (dest_dir / manifest_name).write_text(json.dumps(manifest, indent=2) + "\n")
-
-        print("  → Creating commit... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "add", f"pool/main/{meta['package']}"])
-        run_cmd_in(tmp_dir, ["git", "commit", "-m",
-                             f"publish: {meta['package']} {meta['version']} ({meta['architecture']})"])
-        print("done")
-
-        print("  → Pushing branch... ", end="", flush=True)
-        run_cmd_in(tmp_dir, ["git", "push", "origin", branch])
-        print("done")
-
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    # Create PR via API
-    head = pr_head if pr_head else branch
     pr_body = (
         f"## Package: `{meta['package']}`\n\n"
         f"| Field | Value |\n"
@@ -221,19 +155,147 @@ def run(deb: Optional[str] = None):
         f"buffer release; CI verifies the sha256 and, on merge, promotes it into the "
         f"official `apt-pool` release."
     )
-    print("  → Creating pull request... ", end="", flush=True)
-    pr = gh.create_pull_request(
-        TARGET_OWNER, TARGET_REPO,
-        f"publish: {meta['package']} {meta['version']}",
-        pr_body, head, "main",
+    open_pr(gh, pr_head_owner, branch, f"publish: {meta['package']} {meta['version']}", pr_body)
+
+
+def run_meta_only():
+    """Update the store listing (meta.json, screenshots, icon) without a new
+    .deb. The version and binary stay as published; CI checks ownership and the
+    metadata policy exactly as for a release, and merges it automatically."""
+    check_git_installed()
+
+    raw, app_dir = load_app_builder(Path.cwd())
+    pkg = raw.get("package_name", "")
+    if not is_valid_package_name(pkg):
+        print(f"ERROR: app-builder.json has no valid package_name (got '{pkg}')", file=sys.stderr)
+        sys.exit(1)
+    store_meta = store_meta_from(raw)
+    print(f"Package: {pkg} (store listing only, no new .deb)")
+    print()
+
+    if not fetch_url(f"{RAW_BASE}/pool/main/{pkg}/meta.json"):
+        print(f"ERROR: '{pkg}' is not published yet. Publish a .deb first with `czdev publish`.", file=sys.stderr)
+        sys.exit(1)
+
+    gh = GitHubClient(auth.load_token())
+    user = gh.get_user()
+
+    print("Preflight checks:")
+    meta_out = build_merged_meta(store_meta, {"package": pkg, "maintainer": ""}, user)
+    precheck_store_meta(meta_out, app_dir, store_meta, pkg)
+
+    push_owner, push_repo, pr_head_owner = push_target(gh, user)
+    branch = f"metadata/{pkg}-{int(time.time())}"
+    push_pool_branch(gh, push_owner, push_repo, branch, pkg, app_dir, store_meta, meta_out,
+                     extra={}, message=f"metadata: {pkg} store listing")
+    pr_body = (
+        f"## Store listing update: `{pkg}`\n\n"
+        f"Only `meta.json`, screenshots and the icon change; the published version and "
+        f"binary stay as they are.\n\n"
+        f"Submitted via `czdev publish --meta-only`."
     )
+    open_pr(gh, pr_head_owner, branch, f"metadata: {pkg} (store listing)", pr_body)
+
+
+def push_target(gh: GitHubClient, user) -> tuple:
+    """Where to push the PR branch: the official repo for maintainers, the
+    contributor's fork otherwise. Returns (owner, repo, PR head owner or None)."""
+    perm = gh.check_permission(TARGET_OWNER, TARGET_REPO)
+    if perm >= Permission.WRITE:
+        return TARGET_OWNER, TARGET_REPO, None
+    print(f"You don't have write access to {TARGET_OWNER}/{TARGET_REPO}.")
+    print("  → Forking to your account...  ", end="", flush=True)
+    fork_name = gh.fork_repo(TARGET_OWNER, TARGET_REPO)
+    print(f"done ({fork_name})")
+    owner, repo = fork_name.split("/")
+    return owner, repo, user.login
+
+
+def push_pool_branch(gh: GitHubClient, push_owner: str, push_repo: str, branch: str, pkg: str,
+                     app_dir: str, store_meta: dict, meta_out: dict, extra: dict, message: str):
+    """Commit pool/main/<pkg>/ (meta.json, screenshots, icon and `extra` files)
+    on a new branch of the push target, based on the official repo's main.
+
+    The branch is created through the API at upstream main's commit rather
+    than from the fork's own main: a fork that has not been synced in a while
+    would otherwise base the PR on old history and conflict. A fork shares its
+    object store with upstream, so that commit is already there.
+    """
+    print(f"Uploading metadata to {TARGET_OWNER}/{TARGET_REPO}...")
+    upstream_sha = gh.get_ref_sha(TARGET_OWNER, TARGET_REPO, "heads/main")
+    print(f"  → Creating branch {branch} at upstream main ({upstream_sha[:7]})... ", end="", flush=True)
+    # A fork that was created a moment ago may not accept refs yet.
+    for attempt in range(6):
+        try:
+            gh.create_ref(push_owner, push_repo, branch, upstream_sha)
+            break
+        except urllib.error.HTTPError:
+            if attempt == 5:
+                raise
+            time.sleep(5)
+    print("done")
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="czdev-publish-"))
+    try:
+        run_cmd_in(tmp_dir, ["git", "init"])
+        run_cmd_in(tmp_dir, ["git", "remote", "add", "origin", f"git@github.com:{push_owner}/{push_repo}.git"])
+
+        print("  → git fetch (minimal)... ", end="", flush=True)
+        run_cmd_in(tmp_dir, ["git", "fetch", "--depth=1", "--filter=blob:none", "origin", branch])
+        run_cmd_in(tmp_dir, ["git", "checkout", "-b", branch, "FETCH_HEAD"])
+        print("done")
+
+        dest_dir = tmp_dir / "pool" / "main" / pkg
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        # Copy screenshots
+        if store_meta.get("screenshots"):
+            screenshots_dest = dest_dir / "screenshots"
+            if screenshots_dest.is_dir():
+                shutil.rmtree(screenshots_dest)
+            screenshots_dest.mkdir(parents=True, exist_ok=True)
+            for shot in store_meta["screenshots"]:
+                src = Path(app_dir) / shot
+                if not src.exists():
+                    print(f"ERROR: Screenshot not found: {src}", file=sys.stderr)
+                    sys.exit(1)
+                shutil.copy2(src, screenshots_dest / src.name)
+
+        # Copy icon
+        if store_meta.get("icon"):
+            icon_src = Path(app_dir) / store_meta["icon"]
+            if icon_src.exists():
+                shutil.copy2(icon_src, dest_dir / icon_src.name)
+
+        # meta.json was built and pre-checked before anything was uploaded.
+        (dest_dir / "meta.json").write_text(json.dumps(meta_out, indent=2, ensure_ascii=False) + "\n")
+        for name, text in extra.items():
+            (dest_dir / name).write_text(text)
+
+        print("  → Creating commit... ", end="", flush=True)
+        run_cmd_in(tmp_dir, ["git", "add", "-A", f"pool/main/{pkg}"])
+        run_cmd_in(tmp_dir, ["git", "commit", "-m", message])
+        print("done")
+
+        print("  → Pushing branch... ", end="", flush=True)
+        run_cmd_in(tmp_dir, ["git", "push", "origin", branch])
+        print("done")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def open_pr(gh: GitHubClient, pr_head_owner: Optional[str], branch: str, title: str, body: str):
+    head = f"{pr_head_owner}:{branch}" if pr_head_owner else branch
+    print("  → Creating pull request... ", end="", flush=True)
+    pr = gh.create_pull_request(TARGET_OWNER, TARGET_REPO, title, body, head, "main")
     print("done")
 
     print()
     print("✓ Pull request created:")
     print(f"  {pr.html_url}")
     print()
-    print("  The PR will be validated by CI. A maintainer will review and merge it.")
+    print("  The PR will be validated by CI. Updates to your own packages merge automatically;")
+    print("  a first release waits for a maintainer.")
 
 
 def resolve_deb(deb: Optional[str]) -> str:
@@ -260,40 +322,48 @@ def load_store_meta(deb_path: str) -> tuple:
         Path(deb_path).parent,
     ]
 
+    raw, app_dir = load_app_builder(*search_dirs)
+    return store_meta_from(raw), app_dir
+
+
+def load_app_builder(*search_dirs: Path) -> tuple:
+    """The first app-builder.json found, parsed, with the directory it is in."""
     for d in search_dirs:
         manifest_path = d / "app-builder.json"
         if manifest_path.exists():
-            raw = json.loads(manifest_path.read_text())
-
-            if "store" not in raw:
-                print("app-builder.json found but missing \"store\" section.", file=sys.stderr)
-                print('  Add a "store" field with title, summary, categories, screenshots, etc.', file=sys.stderr)
-                sys.exit(1)
-
-            store = raw["store"]
-            meta = {
-                "title": raw.get("app_name", ""),
-                "summary": store.get("summary", ""),
-                "categories": store.get("categories", []),
-                "screenshots": store.get("screenshots", []),
-            }
-            for key in ("description", "locales", "license", "source_repo",
-                        "icon", "permissions", "share_code"):
-                if store.get(key):
-                    meta[key] = store[key]
-            if isinstance(store.get("author"), dict):
-                meta["author"] = store["author"]
-
-            if not meta["screenshots"]:
-                print("No screenshots defined in app-builder.json store.screenshots.", file=sys.stderr)
-                print("  Add at least one 320x170 screenshot to publish.", file=sys.stderr)
-                sys.exit(1)
-
-            return meta, str(d)
+            return json.loads(manifest_path.read_text()), str(d)
 
     print("app-builder.json not found in current directory.", file=sys.stderr)
     print("  Run `czdev publish` from your app's project directory.", file=sys.stderr)
     sys.exit(1)
+
+
+def store_meta_from(raw: dict) -> dict:
+    """The store listing fields of an app-builder.json."""
+    if "store" not in raw:
+        print("app-builder.json found but missing \"store\" section.", file=sys.stderr)
+        print('  Add a "store" field with title, summary, categories, screenshots, etc.', file=sys.stderr)
+        sys.exit(1)
+
+    store = raw["store"]
+    meta = {
+        "title": raw.get("app_name", ""),
+        "summary": store.get("summary", ""),
+        "categories": store.get("categories", []),
+        "screenshots": store.get("screenshots", []),
+    }
+    for key in ("description", "locales", "license", "source_repo",
+                "icon", "permissions", "share_code"):
+        if store.get(key):
+            meta[key] = store[key]
+    if isinstance(store.get("author"), dict):
+        meta["author"] = store["author"]
+
+    if not meta["screenshots"]:
+        print("No screenshots defined in app-builder.json store.screenshots.", file=sys.stderr)
+        print("  Add at least one 320x170 screenshot to publish.", file=sys.stderr)
+        sys.exit(1)
+    return meta
 
 
 RAW_BASE = f"https://raw.githubusercontent.com/{TARGET_OWNER}/{TARGET_REPO}/main"
@@ -520,7 +590,7 @@ def is_valid_package_name(name: str) -> bool:
 
 def branch_name(meta: dict) -> str:
     ts = int(time.time())
-    return f"publish/{meta['package']}-{meta['version']}-{ts}"
+    return f"publish/{meta['package']}-{ref_safe(meta['version'])}-{ts}"
 
 
 def check_version_newer(meta: dict):
@@ -559,16 +629,6 @@ def check_version_newer(meta: dict):
         print("    Later version updates merge automatically.")
 
 
-def compare_versions(a: str, b: str) -> int:
-    def parse(v):
-        return [int(x) for x in re.split(r'[.\-~]', v) if x.isdigit()]
-
-    pa, pb = parse(a), parse(b)
-    if pa > pb:
-        return 1
-    elif pa < pb:
-        return -1
-    return 0
 
 
 def check_git_installed():

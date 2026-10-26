@@ -39,6 +39,8 @@ def main():
     # publish
     pub_parser = subparsers.add_parser("publish", help="Publish a .deb package to the CardputerZero app store.")
     pub_parser.add_argument("--deb", default=None, help="Path to .deb file. If omitted, searches ./build/*.deb")
+    pub_parser.add_argument("--meta-only", action="store_true",
+                            help="Only update the store listing (app-builder.json store section, screenshots, icon); no new .deb.")
 
     # unpublish
     unpub_parser = subparsers.add_parser("unpublish", help="Create a PR to remove a published package.")
@@ -66,8 +68,12 @@ def main():
         from .bump import run
         run(deb=args.deb)
     elif args.command == "publish":
-        from .publish import run
-        run(deb=args.deb)
+        if args.meta_only:
+            from .publish import run_meta_only
+            run_meta_only()
+        else:
+            from .publish import run
+            run(deb=args.deb)
     elif args.command == "unpublish":
         from .unpublish import run
         run(package=args.package, version=args.version, arch=args.arch)
