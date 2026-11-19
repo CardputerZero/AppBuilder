@@ -1,0 +1,17 @@
+name: Test czdev
+
+on:
+  push:
+    paths: ['scripts/czdev/**', 'tests/**', '.github/workflows/test-czdev.yml']
+  pull_request:
+    paths: ['scripts/czdev/**', 'tests/**', '.github/workflows/test-czdev.yml']
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s tests -v

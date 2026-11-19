@@ -138,7 +138,8 @@ def run(deb: Optional[str] = None):
     #    branch — no .deb, no LFS.
     push_pool_branch(gh, push_owner, push_repo, branch, meta["package"], app_dir, store_meta, meta_out,
                      extra={manifest_name: json.dumps(manifest, indent=2) + "\n"},
-                     message=f"publish: {meta['package']} {meta['version']} ({meta['architecture']})")
+                     message=f"publish: {meta['package']} {meta['version']} ({meta['architecture']})",
+                     replacement=manifest)
 
     pr_body = (
         f"## Package: `{meta['package']}`\n\n"
@@ -153,9 +154,11 @@ def run(deb: Optional[str] = None):
         f"| Binary | [{asset_name}]({download_url}) |\n\n"
         f"Submitted via `czdev publish`. The `.deb` is hosted on the contributor's "
         f"buffer release; CI verifies the sha256 and, on merge, promotes it into the "
-        f"official `apt-pool` release."
+        f"official `apt-pool` release. Older versions are replaced automatically; "
+        f"their store download links are removed after the new version is deployed."
     )
     open_pr(gh, pr_head_owner, branch, f"publish: {meta['package']} {meta['version']}", pr_body)
+    print("  Once the new version is deployed, older store versions are removed automatically.")
 
 
 def run_meta_only():
@@ -212,7 +215,8 @@ def push_target(gh: GitHubClient, user) -> tuple:
 
 
 def push_pool_branch(gh: GitHubClient, push_owner: str, push_repo: str, branch: str, pkg: str,
-                     app_dir: str, store_meta: dict, meta_out: dict, extra: dict, message: str):
+                     app_dir: str, store_meta: dict, meta_out: dict, extra: dict, message: str,
+                     replacement: Optional[dict] = None):
     """Commit pool/main/<pkg>/ (meta.json, screenshots, icon and `extra` files)
     on a new branch of the push target, based on the official repo's main.
 
@@ -271,6 +275,8 @@ def push_pool_branch(gh: GitHubClient, push_owner: str, push_repo: str, branch: 
         (dest_dir / "meta.json").write_text(json.dumps(meta_out, indent=2, ensure_ascii=False) + "\n")
         for name, text in extra.items():
             (dest_dir / name).write_text(text)
+        if replacement is not None:
+            retire_older_manifests(dest_dir, replacement)
 
         print("  → Creating commit... ", end="", flush=True)
         run_cmd_in(tmp_dir, ["git", "add", "-A", f"pool/main/{pkg}"])
@@ -296,6 +302,22 @@ def open_pr(gh: GitHubClient, pr_head_owner: Optional[str], branch: str, title: 
     print()
     print("  The PR will be validated by CI. Updates to your own packages merge automatically;")
     print("  a first release waits for a maintainer.")
+
+
+def retire_older_manifests(directory: Path, replacement: dict):
+    """Replace only older versions of this package; metadata-only PRs skip this."""
+    target = directory / (replacement["filename"] + ".release.json")
+    if not target.is_file() or json.loads(target.read_text()) != replacement:
+        raise ValueError("replacement manifest is missing or changed")
+    obsolete = []
+    for path in directory.glob("*.deb.release.json"):
+        item = json.loads(path.read_text())
+        if item["package"] != replacement["package"]:
+            raise ValueError(f"manifest package mismatch: {path}")
+        if compare_versions(item["version"], replacement["version"]) < 0:
+            obsolete.append(path)
+    for path in obsolete:
+        path.unlink()
 
 
 def resolve_deb(deb: Optional[str]) -> str:

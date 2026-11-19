@@ -62,6 +62,15 @@ email-address matching.
 
 ### `czdev publish` — end-to-end flow
 
+Version updates automatically replace older store versions. The publish PR
+removes manifests for strictly older Debian versions of the same app, including
+when switching between `arm64` and `all`; listing-only updates keep manifests.
+The shared packages deployment also enforces this for older CLI versions and
+concurrent submissions. Official old download links are removed after the new
+version is deployed and present in both store registries. Your fork's upload
+buffer remains under your control; no manual `czdev unpublish` is needed for
+superseded store versions.
+
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
 │                    czdev publish — End-to-End Flow                             │
