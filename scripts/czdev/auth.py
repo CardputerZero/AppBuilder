@@ -58,7 +58,15 @@ def load_credentials() -> dict:
 def save_credentials(creds: dict):
     path = credentials_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(creds, indent=2))
+    # Narrow the directory even when it already existed from an earlier login.
+    os.chmod(path.parent, stat.S_IRWXU)
+    # Create the file 0600 from the start. write_text() would create it at the
+    # process umask -- commonly 0644 -- leaving the GitHub token world-readable
+    # until the chmod below lands. O_CREAT does not change the mode of a file
+    # that already exists, so keep the explicit chmod for that case.
+    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(creds, handle, indent=2)
     os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
