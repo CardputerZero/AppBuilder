@@ -12,6 +12,7 @@ marked as a GitHub template repository):
     gh repo create my-app --template CardputerZero/Template --public --clone
 """
 
+import json
 import re
 import shutil
 import subprocess
@@ -151,8 +152,23 @@ def substitute(root: Path, name: str, display: str) -> int:
         except (UnicodeDecodeError, OSError):
             continue
         new_text = text
+        is_manifest = path == root / "app-builder.json"
         for old, new in replacements:
+            # Replacements occur inside existing JSON strings; preserve
+            # quoting and backslashes before parsing the scaffolded manifest.
+            if is_manifest:
+                new = json.dumps(new, ensure_ascii=False)[1:-1]
             new_text = new_text.replace(old, new)
+        if is_manifest:
+            try:
+                manifest = json.loads(new_text)
+            except json.JSONDecodeError:
+                # Preserve the existing substitution behavior for custom
+                # templates whose metadata is not a JSON object.
+                manifest = None
+            if isinstance(manifest, dict) and manifest.get("app_name") != display:
+                manifest["app_name"] = display
+                new_text = json.dumps(manifest, ensure_ascii=False, indent=2) + "\n"
         if new_text != text:
             path.write_text(new_text, encoding="utf-8")
             patched += 1
