@@ -142,12 +142,13 @@ gh repo create my-app --template CardputerZero/Template --public --clone
 
 `czdev new` additionally does the per-app renaming that the template needs:
 the CMake project name, the compiled-in `APP_NAME`, the launcher display name,
-and — importantly — the icon files. The template's icons install into the
+the Store title (`app_name` in `app-builder.json` when present), and the icon
+files. The template's icons install into the
 **shared** `/usr/share/APPLaunch/share/images/`, so leaving them named
 `template*.png` makes two template-derived packages conflict on install.
 
 ```bash
-./czdev new my-app --display-name "My App"   # launcher name (default: "My App" from the slug)
+./czdev new my-app --display-name "My App"   # launcher and Store name (default: "My App" from the slug)
 ./czdev new my-app --dir ~/projects/my-app   # target directory (default: ./my-app)
 ./czdev new my-app --template me/MyTemplate  # a different template repo, or a git URL
 ./czdev new my-app --ref dev                 # a different template branch
